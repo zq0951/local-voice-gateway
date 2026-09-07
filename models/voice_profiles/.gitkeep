@@ -1,0 +1,1 @@
+# 保留 voice_profiles 目录结构，用户实际声纹采样音频由 .gitignore 忽略

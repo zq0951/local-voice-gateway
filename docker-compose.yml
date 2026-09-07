@@ -1,0 +1,51 @@
+services:
+  # ===============================================
+  # 1. 语音转文字后端 (SenseVoiceSmall via FunASR)
+  # ===============================================
+  funasr-stt:
+    image: registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-cpu-0.4.6
+    container_name: lvg_funasr_stt
+    restart: unless-stopped
+    ports:
+      - "10095:10095"
+    volumes:
+      - ./models/funasr:/workspace/models
+    working_dir: /workspace/FunASR/runtime
+    command: >
+      bash -c "bash run_server.sh 
+      --model-dir /workspace/models/SenseVoiceSmall 
+      --vad-dir /workspace/models/speech_fsmn_vad_zh-cn-16k-common-onnx 
+      --port 10095 2>&1 | tee server.log"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 2G
+
+  # ===============================================
+  # 2. 本地语音交互网关 (Local Voice Gateway)
+  # ===============================================
+  voice-gateway:
+    build: .
+    image: local-voice-gateway:latest
+    container_name: lvg_voice_gateway
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - "/dev/snd:/dev/snd"
+    volumes:
+      - .:/app
+      - ./models/voice_profiles:/app/models/voice_profiles
+    environment:
+      - TRIGGER_MODE=voiceprint_passive
+      - AUDIO_DUPLEX_MODE=half
+      - AUTO_SPEAK=true
+      - STT_WS_URL=ws://127.0.0.1:10095
+      - GATEWAY_PORT=8765
+      - WAKE_WORD_MODEL=hey_jarvis
+      - VOICEPRINT_THRESHOLD=0.50
+    ports:
+      - "8765:8765"
+    depends_on:
+      - funasr-stt
+    network_mode: "host"

@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments & Local Envs
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Models & Symlinks (大模型权重与宿主软链接)
+models/moss_tts
+models/funasr
+models/runtime_config.json
+
+# User Voice Profiles (保护用户个人生物声纹隐私，仅保留空目录)
+models/voice_profiles/*
+!models/voice_profiles/.gitkeep
+
+# Audio Recordings / Temp Voice Files
+temp_*.wav
+temp_*.pcm
+*.wav.tmp
+
+# Editor / IDE configs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

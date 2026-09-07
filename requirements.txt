@@ -1,0 +1,20 @@
+fastapi>=0.115.0
+uvicorn>=0.30.0
+websockets>=13.0
+httpx>=0.27.0
+requests>=2.31.0
+PyAudio>=0.2.14
+soundfile>=0.12.1
+numpy>=1.26.0
+scipy>=1.11.0
+tqdm>=4.66.0
+onnxruntime>=1.18.0
+torch>=2.2.0
+torchaudio>=2.2.0
+mcp>=1.0.0
+pydantic>=2.0.0
+
+# 注意: openwakeword 采用纯 ONNXRuntime 推理。
+# 其 PyPI 元数据在 Linux/ARM 上强制声明了缺乏通用预编译 wheel 的 tflite-runtime，
+# 因此请通过 --no-deps 单独安装 (例如: pip install --no-deps "openwakeword>=0.6.0")。
+# 项目自带的 ./install.sh 与 Dockerfile 会全自动处理，无需手动操作。
