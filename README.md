@@ -38,12 +38,19 @@
 ## 🛠️ 快速开始
 
 ### 1. 一键安装与环境初始化
-```bash
-./install.sh
-```
+
+- **Linux / macOS**：
+  ```bash
+  ./install.sh
+  ```
+- **Windows (CMD / PowerShell / 直接双击)**：
+  ```cmd
+  install.bat
+  ```
+
 脚本将自动完成：
-- 基础系统音频依赖（`alsa-utils`）与 Python 依赖检测同步；
-- 虚拟环境初始化（自动隔离 `.venv`）；
+- 基础系统音频依赖（Linux 自动检测 `alsa-utils`，Windows 自动配置 `PyAudio` 跨平台音频通道）；
+- 虚拟环境初始化（自动创建并隔离 `.venv`）；
 - **模型自动下载向导**：若本地缺失模型，会自动引导从阿里 ModelScope 镜像源极速下载 FunASR 与 MOSS-TTS 预训练权重（无需翻墙与账号）。
 
 > 💡 你也可以随时通过专属工具按需管理与拉取模型：
@@ -58,7 +65,14 @@
 - 也可在 `models/voice_profiles/<你的名字>/` 目录下直接放入 3~5 段个人纯净朗读的 `.wav` 音频（16kHz 单声道）。
 
 ### 3. 一键启动
-```bash
-./start.sh
-```
-网关默认监听 `http://0.0.0.0:8765`，并在控制台实时输出人声活动与事件。
+
+- **Linux / macOS**：
+  ```bash
+  ./start.sh
+  ```
+- **Windows (CMD / PowerShell / 直接双击)**：
+  ```cmd
+  start.bat
+  ```
+
+网关默认监听 `http://0.0.0.0:8765`，并在控制台实时输出人声活动与事件。系统将自动根据当前操作系统（Linux ALSA vs Windows PyAudio）加载最佳声卡通道与设备防独占机制。

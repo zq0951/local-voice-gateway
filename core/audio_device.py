@@ -2,13 +2,14 @@ import os
 import re
 import logging
 import subprocess
+import shutil
 
 logger = logging.getLogger("LocalVoiceGateway")
 
 class AudioDeviceManager:
     """
     音频硬件智能探测与 ALSA 自愈管理器
-    - 自动发现可用麦克风与扬声器
+    - 自动发现可用麦克风与扬声器 (支持 Linux ALSA 与 Windows/macOS PyAudio)
     - 自动生成防独占 (dmix/dsnoop) 与自动重采样 (plug) 的 asound.conf
     - 自动解除静音，避免环境差异导致的运行失败
     """
@@ -17,47 +18,91 @@ class AudioDeviceManager:
     def get_capture_devices():
         """枚举系统所有录音输入设备"""
         devices = []
-        try:
-            out = subprocess.check_output(["arecord", "-l"], stderr=subprocess.DEVNULL).decode("utf-8")
-            # 解析: card 3: M1A [EMEET OfficeCore M1A], device 0: USB Audio [USB Audio]
-            pattern = re.compile(r"card (\d+):\s+([\w\-]+)\s+\[(.*?)\],\s+device (\d+):\s+(.*)")
-            for line in out.splitlines():
-                m = pattern.search(line)
-                if m:
-                    card_num, card_id, card_desc, dev_num, dev_desc = m.groups()
-                    devices.append({
-                        "card_num": int(card_num),
-                        "card_id": card_id,
-                        "card_desc": card_desc,
-                        "device_num": int(dev_num),
-                        "device_desc": dev_desc,
-                        "type": "capture"
-                    })
-        except Exception as e:
-            logger.warning(f"获取录音设备列表失败: {e}")
+        if shutil.which("arecord") and os.name != "nt":
+            try:
+                out = subprocess.check_output(["arecord", "-l"], stderr=subprocess.DEVNULL).decode("utf-8")
+                # 解析: card 3: M1A [EMEET OfficeCore M1A], device 0: USB Audio [USB Audio]
+                pattern = re.compile(r"card (\d+):\s+([\w\-]+)\s+\[(.*?)\],\s+device (\d+):\s+(.*)")
+                for line in out.splitlines():
+                    m = pattern.search(line)
+                    if m:
+                        card_num, card_id, card_desc, dev_num, dev_desc = m.groups()
+                        devices.append({
+                            "card_num": int(card_num),
+                            "card_id": card_id,
+                            "card_desc": card_desc,
+                            "device_num": int(dev_num),
+                            "device_desc": dev_desc,
+                            "type": "capture"
+                        })
+            except Exception as e:
+                logger.warning(f"获取 ALSA 录音设备列表失败: {e}")
+
+        # Windows 或无 arecord 时通过 PyAudio 智能枚举
+        if not devices:
+            try:
+                import pyaudio
+                p = pyaudio.PyAudio()
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get("maxInputChannels", 0) > 0:
+                        name = info.get("name", f"Mic_{i}")
+                        devices.append({
+                            "card_num": i,
+                            "card_id": f"dev_{i}",
+                            "card_desc": name,
+                            "device_num": 0,
+                            "device_desc": f"Channels: {info.get('maxInputChannels')}",
+                            "type": "capture"
+                        })
+                p.terminate()
+            except Exception:
+                pass
         return devices
 
     @staticmethod
     def get_playback_devices():
         """枚举系统所有播放输出设备"""
         devices = []
-        try:
-            out = subprocess.check_output(["aplay", "-l"], stderr=subprocess.DEVNULL).decode("utf-8")
-            pattern = re.compile(r"card (\d+):\s+([\w\-]+)\s+\[(.*?)\],\s+device (\d+):\s+(.*)")
-            for line in out.splitlines():
-                m = pattern.search(line)
-                if m:
-                    card_num, card_id, card_desc, dev_num, dev_desc = m.groups()
-                    devices.append({
-                        "card_num": int(card_num),
-                        "card_id": card_id,
-                        "card_desc": card_desc,
-                        "device_num": int(dev_num),
-                        "device_desc": dev_desc,
-                        "type": "playback"
-                    })
-        except Exception as e:
-            logger.warning(f"获取播放设备列表失败: {e}")
+        if shutil.which("aplay") and os.name != "nt":
+            try:
+                out = subprocess.check_output(["aplay", "-l"], stderr=subprocess.DEVNULL).decode("utf-8")
+                pattern = re.compile(r"card (\d+):\s+([\w\-]+)\s+\[(.*?)\],\s+device (\d+):\s+(.*)")
+                for line in out.splitlines():
+                    m = pattern.search(line)
+                    if m:
+                        card_num, card_id, card_desc, dev_num, dev_desc = m.groups()
+                        devices.append({
+                            "card_num": int(card_num),
+                            "card_id": card_id,
+                            "card_desc": card_desc,
+                            "device_num": int(dev_num),
+                            "device_desc": dev_desc,
+                            "type": "playback"
+                        })
+            except Exception as e:
+                logger.warning(f"获取 ALSA 播放设备列表失败: {e}")
+
+        # Windows 或无 aplay 时通过 PyAudio 智能枚举
+        if not devices:
+            try:
+                import pyaudio
+                p = pyaudio.PyAudio()
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get("maxOutputChannels", 0) > 0:
+                        name = info.get("name", f"Speaker_{i}")
+                        devices.append({
+                            "card_num": i,
+                            "card_id": f"dev_{i}",
+                            "card_desc": name,
+                            "device_num": 0,
+                            "device_desc": f"Channels: {info.get('maxOutputChannels')}",
+                            "type": "playback"
+                        })
+                p.terminate()
+            except Exception:
+                pass
         return devices
 
     @classmethod
@@ -104,6 +149,10 @@ class AudioDeviceManager:
         - 引入 plug 插件：无论硬件支持什么原生采样率，自动重采样，绝不报错
         - 引入 dmix / dsnoop：允许多进程共享麦克风与声卡，绝不出现 Device busy
         """
+        if os.name == "nt" or not shutil.which("arecord"):
+            logger.info("ℹ️ 当前处于 Windows/非 ALSA 环境，声卡将由系统原生驱动与 PyAudio 统一托管，跳过 asound.conf 配置")
+            return True
+
         cap_devs = cls.get_capture_devices()
         play_devs = cls.get_playback_devices()
 

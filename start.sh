@@ -42,7 +42,7 @@ fi
 # 检查声卡设备
 echo "🎙️ 检查音频输入输出设备..."
 if ! command -v arecord &>/dev/null || ! command -v aplay &>/dev/null; then
-    echo "⚠️ 警告: 未找到 arecord / aplay 工具，请安装 alsa-utils: apt-get install -y alsa-utils"
+    echo "ℹ️ 提示: 未检测到 ALSA 工具 (arecord/aplay)，网关将自动启用跨平台 PyAudio 模式托管声卡"
 fi
 
 # 检查 FunASR 服务连通性 (端口 10095)

@@ -3,6 +3,7 @@ import time
 import wave
 import logging
 import os
+import shutil
 from config import (
     SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH, CHUNK_SIZE, 
     ENERGY_THRESHOLD, MIN_ENERGY_THRESHOLD, VAD_MULTIPLIER, 
@@ -18,8 +19,67 @@ _global_noise_floor = 0.0
 _global_calibrated_threshold = 0.0
 is_enrolling_event = __import__('threading').Event()
 
+class PyAudioStreamReader:
+    """跨平台麦克风流读取器 (统一包装为与 subprocess.Popen 兼容的对象)"""
+    def __init__(self, sample_rate, channels, chunk_size):
+        import pyaudio
+        self.p = pyaudio.PyAudio()
+        self.stream = self.p.open(
+            format=pyaudio.paInt16,
+            channels=channels,
+            rate=sample_rate,
+            input=True,
+            frames_per_buffer=chunk_size
+        )
+        self.closed = False
+
+    class _StdoutWrapper:
+        def __init__(self, parent):
+            self.parent = parent
+
+        def read(self, n):
+            if self.parent.closed:
+                return b''
+            try:
+                frames = max(1, n // (2 * CHANNELS))
+                return self.parent.stream.read(frames, exception_on_overflow=False)
+            except Exception as e:
+                logger.debug(f"PyAudio 读取音频流异常: {e}")
+                return b''
+
+    @property
+    def stdout(self):
+        return self._StdoutWrapper(self)
+
+    def terminate(self):
+        self.close()
+
+    def kill(self):
+        self.close()
+
+    def wait(self, timeout=None):
+        self.close()
+
+    def poll(self):
+        return 0 if self.closed else None
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            try:
+                self.stream.stop_stream()
+                self.stream.close()
+            except Exception:
+                pass
+            try:
+                self.p.terminate()
+            except Exception:
+                pass
+
 def cleanup_arecord():
     """安全回收遗留的 arecord 麦克风录音进程"""
+    if os.name == 'nt' or not shutil.which("pkill"):
+        return
     try:
         subprocess.run(["pkill", "-9", "-f", "arecord -q -f S16_LE"], 
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -27,13 +87,16 @@ def cleanup_arecord():
         logger.debug(f"pkill arecord 清理异常: {e}")
 
 def create_microphone_stream():
-    """创建一个连续读取麦克风 16kHz PCM 的子进程管道"""
+    """创建一个连续读取麦克风 16kHz PCM 的流对象 (优先 ALSA arecord，Windows/非 ALSA 环境自动回退至 PyAudio)"""
     cleanup_arecord()
-    proc = subprocess.Popen(
-        ["arecord", "-q", "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", str(CHANNELS), "-t", "raw"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    return proc
+    if os.name != 'nt' and shutil.which("arecord"):
+        proc = subprocess.Popen(
+            ["arecord", "-q", "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", str(CHANNELS), "-t", "raw"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        return proc
+    else:
+        return PyAudioStreamReader(SAMPLE_RATE, CHANNELS, CHUNK_SIZE)
 
 def record_audio_until_silence(output_filename="temp_recorded.wav", allow_enrolling=False, listen_timeout=None):
     """
