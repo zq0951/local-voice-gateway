@@ -92,6 +92,54 @@ def apply_offline_patches(moss_path, hf_cache_path):
             return res
         PreTrainedModel.from_pretrained = _patched_pt_from_pretrained
 
+        # 6. 修复部分 transformers 版本中 safetensors metadata 为 None 时 load_state_dict 崩溃 ('NoneType' object has no attribute 'get')
+        try:
+            import safetensors
+            _orig_safe_open = safetensors.safe_open
+
+            class _SafeOpenProxy:
+                def __init__(self, *args, **kwargs):
+                    self._f = _orig_safe_open(*args, **kwargs)
+                    self._ctx = None
+
+                def __enter__(self):
+                    self._ctx = self._f.__enter__()
+                    return self
+
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    if hasattr(self._f, "__exit__"):
+                        return self._f.__exit__(exc_type, exc_val, exc_tb)
+                    return False
+
+                def metadata(self):
+                    target = self._ctx or self._f
+                    meta = target.metadata() if hasattr(target, "metadata") else None
+                    return meta if meta is not None else {"format": "pt"}
+
+                def __getattr__(self, name):
+                    target = self._ctx or self._f
+                    return getattr(target, name)
+
+            safetensors.safe_open = _SafeOpenProxy
+            import transformers.modeling_utils as modeling_utils
+            if hasattr(modeling_utils, "safe_open"):
+                modeling_utils.safe_open = _SafeOpenProxy
+
+            # 7. 补充 load_state_dict 双重容错：若遇任何元数据提取异常，自动退回直接读取 safetensors
+            if hasattr(modeling_utils, "load_state_dict"):
+                _orig_load_state_dict = modeling_utils.load_state_dict
+                def _patched_load_state_dict(checkpoint_file, *args, **kwargs):
+                    try:
+                        return _orig_load_state_dict(checkpoint_file, *args, **kwargs)
+                    except AttributeError as ae:
+                        if "has no attribute 'get'" in str(ae):
+                            from safetensors.torch import load_file
+                            return load_file(str(checkpoint_file), device="cpu")
+                        raise
+                modeling_utils.load_state_dict = _patched_load_state_dict
+        except Exception as e:
+            logger.warning(f"safetensors metadata 兼容性补丁注入提示: {e}")
+
         logger.info(f"🛠️ [CPU-Patch] MOSS-TTS 离线补丁已成功注入 (HF_HOME={hf_cache_path})")
     except Exception as e:
         logger.error(f"注入离线补丁失败: {e}")

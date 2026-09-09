@@ -55,8 +55,9 @@ exit /b 1
 :FOUND_PYTHON
 echo [Python] 选定运行时: !PYTHON_EXEC!
 
-:: 3. 检查 FunASR 语音识别服务连通性
-powershell -NoProfile -Command "$t = New-Object Net.Sockets.TcpClient; try { $t.Connect('127.0.0.1', 10095); Write-Host '[FunASR] 本地语音识别服务在线 (127.0.0.1:10095)' -ForegroundColor Green } catch { Write-Host '[FunASR] 提示: 10095 端口未监听 (若需识别请启动 FunASR)' -ForegroundColor Yellow } finally { $t.Dispose() }" 2>nul
+:: 3. 检查 FunASR 语音识别服务连通性 (纯 Python 探测，毫秒级且无 PowerShell 兼容性风险)
+"!PYTHON_EXEC!" -c "import socket; s = socket.socket(); s.settimeout(0.3); res = s.connect_ex(('127.0.0.1', 10095)); print('[FunASR] 本地语音识别服务在线 (127.0.0.1:10095)' if res == 0 else '[FunASR] 提示: 10095 端口未监听 (若需识别请启动 FunASR)'); s.close()" 2>nul
+
 
 echo [Gateway] 正在启动网关主进程...
 "!PYTHON_EXEC!" "%DIR%\main.py" %*
