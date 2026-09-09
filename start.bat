@@ -59,7 +59,7 @@ echo 🐍 选定 Python 运行时: !PYTHON_EXEC!
 powershell -NoProfile -Command "$t = New-Object Net.Sockets.TcpClient; try { $t.Connect('127.0.0.1', 10095); Write-Host '✅ FunASR STT 语音识别服务在线 (127.0.0.1:10095)' -ForegroundColor Green } catch { Write-Host '⚠️ 提示: 127.0.0.1:10095 端口未监听，如需本地语音识别请确认 FunASR 已启动 (docker-compose up -d funasr-stt)' -ForegroundColor Yellow } finally { $t.Dispose() }" 2>nul
 
 :: 4. 启动网关主进程
-echo ✨ 正在启动网关主进程...
+echo [LocalVoiceGateway] 正在启动网关主进程...
 "!PYTHON_EXEC!" "%DIR%\main.py" %*
 
 if %errorlevel% neq 0 (

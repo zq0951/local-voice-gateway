@@ -74,9 +74,23 @@ class WakeWordDetector:
             import openwakeword
             from openwakeword.model import Model
             
+            local_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "wakeword")
+            melspec_path = os.path.join(local_dir, "melspectrogram.onnx")
+            embedding_path = os.path.join(local_dir, "embedding_model.onnx")
+
             resolved_paths = self._resolve_model_paths()
             logger.info(f"⏳ 正在加载 OpenWakeWord 模型: {resolved_paths} ...")
-            self.model = Model(wakeword_models=resolved_paths, inference_framework="onnx")
+
+            model_kwargs = {
+                "wakeword_models": resolved_paths,
+                "inference_framework": "onnx"
+            }
+            if os.path.exists(melspec_path):
+                model_kwargs["melspec_model_path"] = melspec_path
+            if os.path.exists(embedding_path):
+                model_kwargs["embedding_model_path"] = embedding_path
+
+            self.model = Model(**model_kwargs)
             self._is_loaded = True
             logger.info(f"✅ OpenWakeWord 唤醒引擎加载完成 (阈值: {self.threshold})")
             return True

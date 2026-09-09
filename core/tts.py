@@ -79,15 +79,26 @@ def apply_offline_patches(moss_path, hf_cache_path):
     except Exception as e:
         logger.error(f"注入离线补丁失败: {e}")
 
-def _find_snapshot_path(hf_cache_dir, repo_model_dir):
-    """从本地 HuggingFace 缓存目录中提取最新的 snapshot 绝对路径"""
-    if not hf_cache_dir or not os.path.exists(hf_cache_dir):
+def _find_model_directory(root_dir, keyword, indicator_files=("config.json", "model.safetensors")):
+    """在 root_dir 下智能递归查找包含特定关键字及标志性权重文件的真实物理目录"""
+    if not root_dir or not os.path.exists(root_dir):
         return None
-    snapshots_dir = os.path.join(hf_cache_dir, "hub", repo_model_dir, "snapshots")
-    if os.path.exists(snapshots_dir):
-        subdirs = [os.path.join(snapshots_dir, d) for d in os.listdir(snapshots_dir) if os.path.isdir(os.path.join(snapshots_dir, d))]
-        if subdirs:
-            return sorted(subdirs)[-1]
+
+    keyword_lower = keyword.lower()
+    candidates = []
+
+    for root, dirs, files in os.walk(root_dir):
+        path_lower = root.lower()
+        if keyword_lower in path_lower:
+            if any(f in files for f in indicator_files):
+                candidates.append(root)
+
+    if candidates:
+        # 优先匹配 snapshots 下的具体哈希版本目录
+        snapshot_cands = [c for c in candidates if "snapshots" in c.lower()]
+        if snapshot_cands:
+            return sorted(snapshot_cands)[-1]
+        return sorted(candidates)[-1]
     return None
 
 def init_tts_engine():
@@ -99,7 +110,7 @@ def init_tts_engine():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates = [
         MOSS_MODEL_DIR,
-        os.path.join(base_dir, "models/moss_tts"),
+        os.path.join(base_dir, "models", "moss_tts"),
         os.path.join(base_dir, "MOSS-TTS-Nano")
     ]
     
@@ -122,9 +133,10 @@ def init_tts_engine():
         import threading
         torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", "4")))
         
-        # 寻找本地 snapshot 真实物理路径
-        ckpt_path = _find_snapshot_path(hf_cache_dir, "models--OpenMOSS-Team--MOSS-TTS-Nano")
-        tok_path = _find_snapshot_path(hf_cache_dir, "models--OpenMOSS-Team--MOSS-Audio-Tokenizer-Nano")
+        # 智能动态定位本地 snapshot 真实物理路径 (自适应 ModelScope 与 HuggingFace 结构)
+        search_root = hf_cache_dir or moss_dir
+        ckpt_path = _find_model_directory(search_root, "MOSS-TTS-Nano", ("config.json", "model.safetensors"))
+        tok_path = _find_model_directory(search_root, "Audio-Tokenizer", ("config.json", "model.safetensors"))
 
         kwargs = {
             "device": "cpu",
