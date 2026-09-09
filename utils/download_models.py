@@ -9,6 +9,8 @@ import os
 import sys
 import argparse
 import subprocess
+import shutil
+import tempfile
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
@@ -74,12 +76,43 @@ def download_moss_tts(target_dir=None):
     infer_script = os.path.join(target_dir, "infer.py")
     if not os.path.exists(infer_script):
         print("⏳ 正在拉取 MOSS-TTS-Nano 运行时代码仓库...")
-        # 优先使用国内镜像或官方 github
-        cmd = f"git clone --depth=1 https://github.com/OpenMOSS/MOSS-TTS-Nano.git '{target_dir}'"
-        ret = os.system(cmd)
-        if ret != 0 or not os.path.exists(infer_script):
-            print("⚠️ GitHub 克隆可能受网络影响，尝试通过镜像拉取...")
-            os.system(f"git clone --depth=1 https://hub.fastgit.xyz/OpenMOSS/MOSS-TTS-Nano.git '{target_dir}' 2>/dev/null || git clone --depth=1 https://gitclone.com/github.com/OpenMOSS/MOSS-TTS-Nano.git '{target_dir}'")
+        git_urls = [
+            "https://github.com/OpenMOSS/MOSS-TTS-Nano.git",
+            "https://gitclone.com/github.com/OpenMOSS/MOSS-TTS-Nano.git",
+            "https://ghproxy.net/https://github.com/OpenMOSS/MOSS-TTS-Nano.git"
+        ]
+        cloned_ok = False
+        temp_dir = tempfile.mkdtemp(prefix="moss_clone_")
+        try:
+            for url in git_urls:
+                try:
+                    res = subprocess.run(
+                        ["git", "clone", "--depth=1", url, temp_dir],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60
+                    )
+                    if res.returncode == 0 and os.path.exists(os.path.join(temp_dir, "infer.py")):
+                        cloned_ok = True
+                        break
+                    else:
+                        print(f"⚠️ 从 {url} 拉取未完成，尝试备用源...")
+                except Exception as ex:
+                    print(f"⚠️ 克隆源异常 ({url}): {ex}")
+
+            if cloned_ok:
+                for item in os.listdir(temp_dir):
+                    if item == ".git":
+                        continue
+                    s = os.path.join(temp_dir, item)
+                    d = os.path.join(target_dir, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+                print("✅ MOSS-TTS-Nano 运行时代码合并完成")
+            else:
+                print("⚠️ 自动克隆代码失败，后续可手动将 MOSS-TTS-Nano 仓库代码放置于 models/moss_tts 目录")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     if not ensure_modelscope_installed():
         print("❌ modelscope 安装失败，请手动执行: pip install modelscope")

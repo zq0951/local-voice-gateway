@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
 set "DIR=%~dp0"
 if "%DIR:~-1%"=="\" set "DIR=%DIR:~0,-1%"
