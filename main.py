@@ -14,7 +14,7 @@ from core.vad import record_audio_until_silence, create_microphone_stream, is_en
 from core.speaker_verifier import SPEAKER_VERIFIER
 from core.wakeword import WAKEWORD_DETECTOR
 from core.stt import transcribe_audio
-from core.tts import init_tts_engine, synthesize_and_enqueue
+from core.tts import init_tts_engine, synthesize_and_enqueue, enqueue_tts
 from core.audio_device import AudioDeviceManager
 from core.enrollment import VOICEPRINT_MANAGER
 from api.server import app, broadcast_event
@@ -42,7 +42,7 @@ async def query_agent_and_speak(user_text: str, speaker_name: str, emotion: str 
             reply = f"{speaker_display}听到你说：{user_text}"
             logger.info(f"🔁 [本地复述模式]: {reply}")
             if getattr(config, "AUTO_SPEAK", True):
-                synthesize_and_enqueue(reply)
+                enqueue_tts(reply)
             else:
                 logger.info("🔇 [AUTO_SPEAK 关闭]: 跳过本地复述语音合成")
         else:
@@ -73,7 +73,7 @@ async def query_agent_and_speak(user_text: str, speaker_name: str, emotion: str 
             reply = data["choices"][0]["message"]["content"]
             logger.info(f"🤖 Agent 回复: {reply}")
             if getattr(config, "AUTO_SPEAK", True):
-                synthesize_and_enqueue(reply)
+                enqueue_tts(reply)
             else:
                 logger.info("🔇 [AUTO_SPEAK 关闭]: 跳过大模型回复语音合成")
         else:

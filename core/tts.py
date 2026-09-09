@@ -233,7 +233,7 @@ def init_tts_engine():
         logger.error(f"初始化 MOSS TTS 失败: {e}")
     return MOSS_SERVICE
 
-def synthesize_and_enqueue(text: str):
+def synthesize_and_enqueue(text: str, check_task_valid=None):
     """合成语音并将生成的双声道 PCM 推入播放队列"""
     clean_text = filter_symbols(text)
     if not clean_text:
@@ -247,6 +247,10 @@ def synthesize_and_enqueue(text: str):
     if MOSS_SERVICE:
         try:
             result = MOSS_SERVICE.synthesize(text=clean_text)
+            if check_task_valid and not check_task_valid():
+                logger.info("🚫 [TTS 取消]: 合成完成但在推入播放前任务已被打断，丢弃生成的音频帧")
+                return False
+
             waveform = result["waveform"]
             sr = result["sample_rate"]
 
@@ -263,6 +267,10 @@ def synthesize_and_enqueue(text: str):
                 waveform = waveform.repeat(2, 1)
 
             pcm_data = (torch.clamp(waveform, -1.0, 1.0) * 32767).to(torch.int16).cpu().numpy().T.tobytes()
+
+            if check_task_valid and not check_task_valid():
+                return False
+
             GLOBAL_AUDIO_QUEUE.put(pcm_data)
             return True
         except Exception as e:
@@ -271,3 +279,115 @@ def synthesize_and_enqueue(text: str):
     else:
         logger.warning(f"TTS 服务未就绪，模拟播报: {clean_text}")
         return False
+
+# ==============================================================================
+# 🎯 异步非阻塞 TTS 调度器 (防止多请求打死 CPU/网络，毫秒级响应，支持即时打断)
+# ==============================================================================
+_tts_task_queue = queue.Queue()
+_current_task_id = 0
+_task_id_lock = threading.Lock()
+_worker_started = False
+_worker_lock = threading.Lock()
+_broadcast_callback = None
+
+def set_tts_event_broadcaster(callback):
+    """设置事件广播回调函数，用于向外部客户端实时推送 TTS 状态"""
+    global _broadcast_callback
+    _broadcast_callback = callback
+
+def _notify_event(event_dict):
+    if _broadcast_callback:
+        try:
+            _broadcast_callback(event_dict)
+        except Exception as e:
+            logger.debug(f"广播 TTS 事件异常: {e}")
+
+def _tts_worker_loop():
+    logger.info("🧵 [TTS Worker]: 异步后台合成队列就绪")
+    while True:
+        try:
+            task_id, text = _tts_task_queue.get()
+            with _task_id_lock:
+                is_stale = (task_id != _current_task_id)
+
+            if is_stale:
+                _tts_task_queue.task_done()
+                continue
+
+            # 广播正在生成语音状态
+            _notify_event({"event": "tts_generating", "text": text, "task_id": task_id})
+
+            # 执行模型推理合成 (单线程安全隔离，绝不占死主线程)
+            success = synthesize_and_enqueue(text, check_task_valid=lambda: task_id == _current_task_id)
+
+            with _task_id_lock:
+                is_stale = (task_id != _current_task_id)
+
+            if success and not is_stale:
+                _notify_event({"event": "tts_playing", "text": text, "task_id": task_id})
+            else:
+                if is_stale:
+                    logger.info(f"🚫 [TTS 任务已丢弃]: 任务 #{task_id} 已被后续请求抢占打断")
+                else:
+                    _notify_event({"event": "tts_idle", "task_id": task_id})
+
+            _tts_task_queue.task_done()
+        except Exception as e:
+            logger.error(f"TTS Worker 异常: {e}")
+            time.sleep(0.1)
+
+def ensure_tts_worker():
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            th = threading.Thread(target=_tts_worker_loop, daemon=True, name="TTSWorkerThread")
+            th.start()
+            _worker_started = True
+
+def enqueue_tts(text: str, interrupt_previous: bool = True) -> int:
+    """
+    将待播报文本异步排队，并立即返回任务 ID (耗时 < 1ms，绝不挂起 HTTP 接口)。
+    当 interrupt_previous=True 时，自动清空旧积压任务并打断当前音箱发声。
+    """
+    global _current_task_id
+    clean_text = filter_symbols(text)
+    if not clean_text:
+        return 0
+
+    ensure_tts_worker()
+
+    with _task_id_lock:
+        _current_task_id += 1
+        task_id = _current_task_id
+
+    if interrupt_previous:
+        # 清空所有尚未开始合成的旧文本
+        while not _tts_task_queue.empty():
+            try:
+                _tts_task_queue.get_nowait()
+                _tts_task_queue.task_done()
+            except:
+                break
+        # 立即终止扬声器当前播放
+        from core.playback import stop_playback
+        stop_playback()
+
+    _tts_task_queue.put((task_id, clean_text))
+    # 立即广播正在生成状态
+    _notify_event({"event": "tts_generating", "text": clean_text, "task_id": task_id})
+    return task_id
+
+def stop_tts():
+    """彻底终止所有正在排队、合成中和播放中的 TTS 任务"""
+    global _current_task_id
+    with _task_id_lock:
+        _current_task_id += 1  # 递增 ID 使得当前正在合成中的任务即使生成完毕也会被废弃
+    while not _tts_task_queue.empty():
+        try:
+            _tts_task_queue.get_nowait()
+            _tts_task_queue.task_done()
+        except:
+            break
+    from core.playback import stop_playback
+    stop_playback()
+    _notify_event({"event": "tts_stopped"})

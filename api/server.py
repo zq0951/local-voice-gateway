@@ -7,8 +7,8 @@ from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import config
-from core.playback import play_ding, stop_playback
-from core.tts import synthesize_and_enqueue
+from core.playback import play_ding, stop_playback, set_playback_callback
+from core.tts import synthesize_and_enqueue, enqueue_tts, stop_tts, set_tts_event_broadcaster
 from core.speaker_verifier import SPEAKER_VERIFIER
 from core.wakeword import WAKEWORD_DETECTOR
 from core.enrollment import VOICEPRINT_MANAGER
@@ -58,19 +58,46 @@ app.add_middleware(
 
 # 活跃 WebSocket 客户端集合，用于广播事件
 connected_clients: Set[WebSocket] = set()
+_main_async_loop: Optional[asyncio.AbstractEventLoop] = None
+
+@app.on_event("startup")
+async def _on_fastapi_startup():
+    global _main_async_loop
+    _main_async_loop = asyncio.get_running_loop()
 
 async def broadcast_event(event_data: dict):
     """向所有连接的外部 Agent 或 Web UI 客户端广播事件"""
     if not connected_clients:
         return
     disconnected = set()
-    for ws in connected_clients:
+    for ws in list(connected_clients):
         try:
             await ws.send_json(event_data)
         except Exception:
             disconnected.add(ws)
     for ws in disconnected:
-        connected_clients.remove(ws)
+        if ws in connected_clients:
+            connected_clients.remove(ws)
+
+def sync_broadcast_event(event_data: dict):
+    """从普通同步后台线程向全局 WebSocket 客户端安全广播事件"""
+    global _main_async_loop
+    if _main_async_loop is not None and _main_async_loop.is_running() and connected_clients:
+        try:
+            asyncio.run_coroutine_threadsafe(broadcast_event(event_data), _main_async_loop)
+        except Exception as e:
+            logger.debug(f"同步广播事件调度异常: {e}")
+
+# 将同步广播接入 TTS 与扬声器状态机
+set_tts_event_broadcaster(sync_broadcast_event)
+
+def _on_playback_state_changed(is_playing: bool):
+    if not is_playing:
+        sync_broadcast_event({"event": "tts_idle"})
+    else:
+        sync_broadcast_event({"event": "playback_started"})
+
+set_playback_callback(_on_playback_state_changed)
 
 @app.get("/v1/system/status")
 async def get_status():
@@ -144,19 +171,18 @@ async def trigger_ding():
 
 @app.post("/v1/audio/speak")
 async def speak_text(text: str = Body(..., embed=True)):
-    """让本地音箱主动合成并播报一段文本 (丢入线程池异步合成，防止阻塞事件循环)"""
-    if not text.strip():
+    """让本地音箱主动合成并播报一段文本 (丢入专用抢占式任务队列，耗时 < 1ms，绝不阻塞网络事件循环)"""
+    clean = text.strip()
+    if not clean:
         return JSONResponse(status_code=400, content={"error": "播报文本不能为空"})
-    
-    success = await asyncio.to_thread(synthesize_and_enqueue, text.strip())
-    await broadcast_event({"event": "speak_triggered", "text": text})
-    return {"status": "queued" if success else "fallback_or_failed"}
+
+    task_id = enqueue_tts(clean, interrupt_previous=True)
+    return {"status": "queued", "task_id": task_id}
 
 @app.post("/v1/audio/stop")
 async def stop_audio():
-    """立即打断当前播报并清空音频队列 (闭嘴开关)"""
-    stop_playback()
-    await broadcast_event({"event": "playback_stopped"})
+    """立即打断当前合成与播报并清空任务队列 (闭嘴开关)"""
+    stop_tts()
     return {"status": "ok"}
 
 # ==============================================================================

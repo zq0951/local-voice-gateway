@@ -68,14 +68,29 @@ class PyAudioPlayer:
             except Exception:
                 pass
 
+_playback_callback = None
+
+def set_playback_callback(callback):
+    """注册扬声器播放状态改变回调函数"""
+    global _playback_callback
+    _playback_callback = callback
+
 def get_is_playing():
     global _is_playing
     return _is_playing
 
 def set_is_playing(status: bool):
     global _is_playing
+    changed = False
     with _playing_lock:
-        _is_playing = status
+        if _is_playing != status:
+            _is_playing = status
+            changed = True
+    if changed and _playback_callback:
+        try:
+            _playback_callback(status)
+        except Exception as e:
+            logger.debug(f"播放状态回调通知异常: {e}")
 
 def stop_playback():
     """清空音频队列并立即终止当前音频播报 (闭嘴功能)"""
