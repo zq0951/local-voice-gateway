@@ -59,9 +59,15 @@ fi
 
 # 安装 pip 依赖
 echo "📦 同步 Python 依赖清单..."
-"$PIP_EXEC" install -r "$DIR/requirements.txt"
+if [ -n "$PIP_EXEC" ] && [ -x "$PIP_EXEC" ]; then
+    PIP_CMD=("$PIP_EXEC")
+else
+    PIP_CMD=("$PYTHON_EXEC" -m pip)
+fi
+
+"${PIP_CMD[@]}" install -r "$DIR/requirements.txt"
 echo "📦 独立安装 openwakeword (使用 --no-deps 纯 ONNX 推理模式)..."
-"$PIP_EXEC" install --no-deps "openwakeword>=0.6.0"
+"${PIP_CMD[@]}" install --no-deps "openwakeword>=0.6.0"
 
 # 检查并配置模型目录
 echo "🔗 检查本地模型路径..."

@@ -59,11 +59,14 @@ def apply_offline_patches(moss_path, hf_cache_path):
                 auto_cls.from_pretrained = _patched_fp
                 auto_cls._is_patched = True
 
-        # 2. 注入 MOSS 虚拟配置模块支持
+        # 2. 注入 MOSS 虚拟配置模块支持 (仅在缺少真实物理模块时作兜底防护)
         for m in ["configuration_moss_audio_tokenizer", "configuration_moss_tts_nano", 
                   "modeling_moss_audio_tokenizer", "modeling_moss_tts_nano"]:
             if m not in sys.modules:
-                sys.modules[m] = types.ModuleType(m)
+                try:
+                    __import__(m)
+                except Exception:
+                    pass
 
         # 3. 禁用 accelerate 探测以防进入 meta 加载
         import transformers.utils.import_utils as import_utils
@@ -147,26 +150,70 @@ def apply_offline_patches(moss_path, hf_cache_path):
     except Exception as e:
         logger.error(f"注入离线补丁失败: {e}")
 
-def _find_model_directory(root_dir, keyword, indicator_files=("config.json", "model.safetensors")):
-    """在 root_dir 下智能递归查找包含特定关键字及标志性权重文件的真实物理目录"""
+def _find_model_directory(root_dir, keyword, required_files=None):
+    """在 root_dir 下智能递归查找包含特定关键字及标志性权重文件的真实物理目录。
+    
+    自动排除 transformers_modules、modules、.cache、.git 等衍生或临时缓存目录，
+    基于完整度、权重文件、hub/snapshots 等特征综合评分，精准锁定主权重目录。
+    """
     if not root_dir or not os.path.exists(root_dir):
         return None
 
     keyword_lower = keyword.lower()
     candidates = []
 
-    for root, dirs, files in os.walk(root_dir):
-        path_lower = root.lower()
-        if keyword_lower in path_lower:
-            if any(f in files for f in indicator_files):
-                candidates.append(root)
+    # 必须排除的黑名单目录名（全部小写）
+    EXCLUDED_DIR_NAMES = {
+        "modules", "transformers_modules", ".cache", ".git", 
+        "__pycache__", ".locks", "venv", ".venv"
+    }
+
+    for root, dirs, files in os.walk(root_dir, followlinks=True):
+        # 1. 就地剪枝，彻底阻止深入任何临时/模块子目录
+        dirs[:] = [
+            d for d in dirs 
+            if d.lower() not in EXCLUDED_DIR_NAMES and not d.startswith(".")
+        ]
+
+        path_normalized = root.replace("\\", "/").lower()
+        
+        # 2. 严防任何父路径含有 modules/transformers_modules/.cache
+        if any(f"/{ex}/" in f"/{path_normalized}/" or path_normalized.endswith(f"/{ex}") for ex in ["modules", "transformers_modules", ".cache"]):
+            continue
+
+        if keyword_lower in path_normalized:
+            file_set = set(files)
+            # 模型或分词器目录必须包含 config.json
+            if "config.json" not in file_set:
+                continue
+
+            # 如果显式指定了 required_files，必须满足至少一项
+            if required_files and not any(rf in file_set for rf in required_files):
+                continue
+
+            # 质量打分
+            score = 0
+            if "hub" in path_normalized:
+                score += 100
+            if "snapshots" in path_normalized:
+                score += 50
+            # 是否有真实模型动态加载代码
+            if any(f.endswith(".py") and "modeling" in f for f in files):
+                score += 40
+            # 是否有权重文件
+            if any(f.endswith((".safetensors", ".bin", ".pt")) for f in files):
+                score += 40
+            score += len(files)
+
+            candidates.append((score, root))
 
     if candidates:
-        # 优先匹配 snapshots 下的具体哈希版本目录
-        snapshot_cands = [c for c in candidates if "snapshots" in c.lower()]
-        if snapshot_cands:
-            return sorted(snapshot_cands)[-1]
-        return sorted(candidates)[-1]
+        # 按综合评分降序排列，得分最高者即为真实完整的主模型目录
+        candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+        chosen = candidates[0][1]
+        logger.info(f"🔍 [模型定位] 为关键字 '{keyword}' 匹配到最优目录 (得分={candidates[0][0]}): {chosen}")
+        return chosen
+
     return None
 
 def init_tts_engine():
@@ -203,8 +250,8 @@ def init_tts_engine():
         
         # 智能动态定位本地 snapshot 真实物理路径 (自适应 ModelScope 与 HuggingFace 结构)
         search_root = hf_cache_dir or moss_dir
-        ckpt_path = _find_model_directory(search_root, "MOSS-TTS-Nano", ("config.json", "model.safetensors"))
-        tok_path = _find_model_directory(search_root, "Audio-Tokenizer", ("config.json", "model.safetensors"))
+        ckpt_path = _find_model_directory(search_root, "MOSS-TTS-Nano")
+        tok_path = _find_model_directory(search_root, "Audio-Tokenizer")
 
         kwargs = {
             "device": "cpu",
@@ -213,8 +260,12 @@ def init_tts_engine():
         }
         if ckpt_path and os.path.exists(ckpt_path):
             kwargs["checkpoint_path"] = ckpt_path
+            if ckpt_path not in sys.path:
+                sys.path.insert(0, ckpt_path)
         if tok_path and os.path.exists(tok_path):
             kwargs["audio_tokenizer_path"] = tok_path
+            if tok_path not in sys.path:
+                sys.path.insert(0, tok_path)
 
         logger.info(f"⏳ 正在加载 MOSS-TTS (模型: {ckpt_path or '默认'}, Tokenizer: {tok_path or '默认'}) ...")
         MOSS_SERVICE = NanoTTSService(**kwargs)
