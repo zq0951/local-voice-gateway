@@ -75,6 +75,23 @@ def apply_offline_patches(moss_path, hf_cache_path):
             return _orig_torch_load(*args, **kwargs)
         torch.load = _patched_torch_load
 
+        # 5. 兼容新版 transformers 中 _keys_to_ignore_* 为 list 时引发的 unsupported operand type(s) for |: 'list' and 'set'
+        from transformers.modeling_utils import PreTrainedModel
+        _orig_pt_from_pretrained = PreTrainedModel.from_pretrained
+        @classmethod
+        def _patched_pt_from_pretrained(cls, *args, **kwargs):
+            for attr in ["_keys_to_ignore_on_load_unexpected", "_keys_to_ignore_on_load_missing"]:
+                val = getattr(cls, attr, None)
+                if isinstance(val, (list, tuple)):
+                    setattr(cls, attr, set(val))
+            res = _orig_pt_from_pretrained.__func__(cls, *args, **kwargs)
+            for attr in ["_keys_to_ignore_on_load_unexpected", "_keys_to_ignore_on_load_missing"]:
+                val = getattr(res, attr, None)
+                if isinstance(val, (list, tuple)):
+                    setattr(res, attr, set(val))
+            return res
+        PreTrainedModel.from_pretrained = _patched_pt_from_pretrained
+
         logger.info(f"🛠️ [CPU-Patch] MOSS-TTS 离线补丁已成功注入 (HF_HOME={hf_cache_path})")
     except Exception as e:
         logger.error(f"注入离线补丁失败: {e}")
@@ -158,7 +175,7 @@ def init_tts_engine():
                 MOSS_SERVICE._load_audio_tokenizer_locked(tts_attn_implementation="sdpa")
                 logger.info("⚡ MOSS-TTS 内存预热完成，已进入毫秒发音状态")
             except Exception as ex:
-                logger.warning(f"MOSS-TTS 预热异常: {ex}")
+                logger.warning(f"MOSS-TTS 预热异常: {ex}", exc_info=True)
         threading.Thread(target=_async_warmup, daemon=True).start()
 
         logger.info("✅ MOSS-TTS 引擎初始化成功")
