@@ -114,8 +114,8 @@ if /i "%CHOICE_ASR%"=="Y" (
 )
 
 :CHECK_MOSS
-:: 8. 检查 MOSS-TTS 模型
-if exist "%DIR%\models\moss_tts" (
+:: 8. 检查 MOSS-TTS 模型与运行时代码
+if exist "%DIR%\models\moss_tts\infer.py" (
     echo ✅ MOSS-TTS 本地模型已就绪
     goto FINISH
 )
