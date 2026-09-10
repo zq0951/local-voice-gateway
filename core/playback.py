@@ -195,102 +195,221 @@ def play_ding():
             with open(DING_PCM_PATH, "rb") as f:
                 pcm_data = f.read()
             GLOBAL_AUDIO_QUEUE.put(pcm_data)
+            GLOBAL_AUDIO_QUEUE.put(None)
         except Exception as e:
             logger.error(f"播放 ding 失败: {e}")
 
+def _close_player(player):
+    """安全关闭音频播放器"""
+    if player is None:
+        return
+    try:
+        if hasattr(player, "stdin") and player.stdin:
+            try:
+                player.stdin.close()
+            except Exception:
+                pass
+        if hasattr(player, "wait"):
+            try:
+                player.wait(timeout=0.3)
+            except Exception:
+                if hasattr(player, "kill"):
+                    try:
+                        player.kill()
+                    except Exception:
+                        pass
+        elif hasattr(player, "close"):
+            player.close()
+    except Exception:
+        pass
+
 def create_audio_player():
-    """创建音频输出流进程或对象 (优先 ALSA aplay，Windows/非 ALSA 环境自动回退至 PyAudio)"""
+    """创建音频输出流进程或对象 (优先物理硬件直连 plughw:X,Y -> ALSA default -> PyAudio 兜底)"""
     if os.name != "nt" and shutil.which("aplay"):
-        return subprocess.Popen(
-            ["aplay", "-D", "default", "-f", "S16_LE", "-r", str(HW_SAMPLE_RATE), 
-             "-c", str(PLAYBACK_CHANNELS), "-t", "raw"],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        candidate_devices = []
+
+        # 1. 动态探测真实物理播放声卡并加入候选列表 (纯数字编号 plughw:X,Y 最优先，完全不依赖 /proc)
+        try:
+            from core.audio_device import AudioDeviceManager
+            p_devs = AudioDeviceManager.get_playback_devices()
+            best = AudioDeviceManager.select_best_device(p_devs)
+            if best:
+                candidate_devices.append(f"plughw:{best['card_num']},{best['device_num']}")
+                candidate_devices.append(f"plughw:CARD={best['card_id']},DEV={best['device_num']}")
+                candidate_devices.append(f"hw:{best['card_num']},{best['device_num']}")
+        except Exception as e:
+            logger.debug(f"探测物理声卡列表异常: {e}")
+
+        # 2. 扫描 /dev/snd/ 目录下的所有硬件播放节点 (作为双重保险)
+        if os.path.exists("/dev/snd"):
+            try:
+                import glob
+                import re
+                for p in sorted(glob.glob("/dev/snd/pcmC*D*p"), reverse=True):
+                    m = re.search(r"pcmC(\d+)D(\d+)p", p)
+                    if m:
+                        target = f"plughw:{m.group(1)},{m.group(2)}"
+                        if target not in candidate_devices:
+                            candidate_devices.append(target)
+            except Exception:
+                pass
+
+        # 3. 兜底加入 ALSA default 虚拟设备
+        if "default" not in candidate_devices:
+            candidate_devices.append("default")
+
+        for dev_name in candidate_devices:
+            try:
+                proc = subprocess.Popen(
+                    ["aplay", "-D", dev_name, "-f", "S16_LE", "-r", str(HW_SAMPLE_RATE), 
+                     "-c", str(PLAYBACK_CHANNELS), "-t", "raw", "-q"],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                )
+                time.sleep(0.05)
+                if proc.poll() is None:
+                    logger.info(f"🔊 已成功连接音频输出设备: aplay -D {dev_name}")
+                    return proc
+                err = proc.stderr.read().decode("utf-8", errors="ignore")
+                logger.warning(f"⚠️ aplay 设备 '{dev_name}' 启动异常 ({err.strip()})，尝试下一候选...")
+            except Exception as e:
+                logger.debug(f"尝试 aplay 设备 {dev_name} 失败: {e}")
+
+        # 4. 所有 aplay 设备均不可用时，平滑回退至 PyAudio
+        logger.warning("⚠️ 所有 aplay 设备均不可用，回退至系统底层 PyAudio 播放器")
+        try:
+            return PyAudioPlayer(HW_SAMPLE_RATE, PLAYBACK_CHANNELS)
+        except Exception as pe:
+            logger.error(f"❌ PyAudio 播放器初始化亦失败: {pe}")
+            return None
     else:
-        return PyAudioPlayer(HW_SAMPLE_RATE, PLAYBACK_CHANNELS)
+        try:
+            return PyAudioPlayer(HW_SAMPLE_RATE, PLAYBACK_CHANNELS)
+        except Exception as pe:
+            logger.error(f"❌ PyAudio 播放器初始化失败: {pe}")
+            return None
 
 def playback_worker(audio_queue: queue.Queue):
-    """音频播放工作线程：从队列拉取原始双声道 PCM 字节并直写播放管道"""
+    """音频播放工作线程：从队列拉取原始双声道 PCM 字节并直写播放管道，支持平滑播放与即时打断"""
     global _current_player_proc
     player_proc = None
 
-    try:
-        while True:
-            try:
-                chunk = audio_queue.get(timeout=0.1)
-            except queue.Empty:
-                if player_proc:
-                    set_is_playing(False)
-                    try:
-                        player_proc.stdin.close()
-                        player_proc.wait(timeout=1)
-                    except:
-                        try:
-                            player_proc.kill()
-                        except:
-                            pass
-                    with _player_proc_lock:
-                        if _current_player_proc is player_proc:
-                            _current_player_proc = None
-                    player_proc = None
-                continue
+    bytes_per_sec = HW_SAMPLE_RATE * PLAYBACK_CHANNELS * 2  # 16000 * 2 * 2 = 64000 字节/秒
 
-            set_is_playing(True)
-
-            if chunk is None:
-                if player_proc:
-                    try:
-                        player_proc.stdin.close()
-                        player_proc.wait(timeout=1)
-                    except:
-                        player_proc.kill()
-                    with _player_proc_lock:
-                        if _current_player_proc is player_proc:
-                            _current_player_proc = None
-                    player_proc = None
-                set_is_playing(False)
-                audio_queue.task_done()
-                continue
-
-            if player_proc is None:
-                try:
-                    player_proc = create_audio_player()
-                    with _player_proc_lock:
-                        _current_player_proc = player_proc
-
-                    # 硬件 DAC 建立缓冲：先注入 150ms 静音防止开头音节被吃
-                    silence_padding = b'\x00' * int(HW_SAMPLE_RATE * PLAYBACK_CHANNELS * 2 * 0.15)
-                    player_proc.stdin.write(silence_padding)
-                    player_proc.stdin.flush()
-                except Exception as e:
-                    logger.error(f"启动音频播放进程失败: {e}")
-                    player_proc = None
-                    with _player_proc_lock:
-                        _current_player_proc = None
-                    audio_queue.task_done()
-                    continue
-
-            try:
-                player_proc.stdin.write(chunk)
-                player_proc.stdin.flush()
-            except Exception as e:
-                logger.error(f"播放器写入音频失败: {e}")
-                try:
-                    player_proc.kill()
-                except:
-                    pass
+    while True:
+        try:
+            chunk = audio_queue.get(timeout=0.2)
+        except queue.Empty:
+            if player_proc:
+                _close_player(player_proc)
                 with _player_proc_lock:
                     if _current_player_proc is player_proc:
                         _current_player_proc = None
                 player_proc = None
+                set_is_playing(False)
+            continue
 
+        if chunk is None:
+            if player_proc:
+                _close_player(player_proc)
+                with _player_proc_lock:
+                    if _current_player_proc is player_proc:
+                        _current_player_proc = None
+                player_proc = None
+            set_is_playing(False)
             audio_queue.task_done()
-    finally:
-        set_is_playing(False)
-        if player_proc:
+            continue
+
+        chunk_len = len(chunk)
+        if chunk_len == 0:
+            audio_queue.task_done()
+            continue
+
+        total_audio_sec = chunk_len / bytes_per_sec
+        set_is_playing(True)
+        logger.info(f"🔊 [扬声器开始发声]: 时长 {total_audio_sec:.1f}s, 写入播放通道...")
+
+        if player_proc is None or (hasattr(player_proc, "poll") and player_proc.poll() is not None):
+            player_proc = create_audio_player()
+            with _player_proc_lock:
+                _current_player_proc = player_proc
+
+            if player_proc is None:
+                logger.error("❌ 无法创建音频播放器，丢弃该段音频")
+                set_is_playing(False)
+                audio_queue.task_done()
+                continue
+
+            # 硬件 DAC 建立缓冲：首段先注入 100ms 静音防止开头音节被硬件吃掉
+            silence_padding = b'\x00' * int(bytes_per_sec * 0.10)
             try:
-                player_proc.kill()
-            except:
-                pass
-        with _player_proc_lock:
-            _current_player_proc = None
+                player_proc.stdin.write(silence_padding)
+                player_proc.stdin.flush()
+            except Exception as e:
+                logger.debug(f"写入初始静音缓冲: {e}")
+
+        # 分片流式写入播放器 (每片 80ms = 5120 字节)
+        slice_size = int(bytes_per_sec * 0.08)
+        offset = 0
+        t_start = time.monotonic()
+        interrupted = False
+
+        try:
+            while offset < chunk_len:
+                with _player_proc_lock:
+                    if _current_player_proc is not player_proc or player_proc is None:
+                        interrupted = True
+                        break
+
+                end_pos = min(offset + slice_size, chunk_len)
+                sub = chunk[offset:end_pos]
+                player_proc.stdin.write(sub)
+                player_proc.stdin.flush()
+                offset = end_pos
+
+                # 动态控制写入节奏：让管道预缓冲保持在 0.8s~1.2s 充裕区间，彻底杜绝 Docker 调度抖动引发的欠载破音 (Buffer Underrun)
+                written_sec = offset / bytes_per_sec
+                elapsed_sec = time.monotonic() - t_start
+                lead_sec = written_sec - elapsed_sec
+                if lead_sec > 1.2:
+                    time.sleep(lead_sec - 0.8)
+                else:
+                    time.sleep(0.005)
+
+            # 数据全部注入管道后，等待硬件自然播放完毕剩余缓冲
+            if not interrupted:
+                written_sec = chunk_len / bytes_per_sec
+                while True:
+                    with _player_proc_lock:
+                        if _current_player_proc is not player_proc or player_proc is None:
+                            interrupted = True
+                            break
+                    elapsed_sec = time.monotonic() - t_start
+                    if elapsed_sec >= written_sec:
+                        logger.info("✅ [扬声器播放完毕]: 音频已完整播放")
+                        break
+                    time.sleep(min(0.05, max(0.01, written_sec - elapsed_sec)))
+
+        except (BrokenPipeError, OSError) as e:
+            err_details = ""
+            if player_proc and hasattr(player_proc, "stderr") and player_proc.stderr:
+                try:
+                    err_details = player_proc.stderr.read().decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    pass
+            logger.error(f"❌ 播放器音频通道异常关闭: {e} {f'(底层报错: {err_details})' if err_details else ''}")
+            _close_player(player_proc)
+            player_proc = None
+            with _player_proc_lock:
+                if _current_player_proc is player_proc:
+                    _current_player_proc = None
+        except Exception as e:
+            logger.error(f"❌ 播放器流式写入异常: {e}")
+            _close_player(player_proc)
+            player_proc = None
+            with _player_proc_lock:
+                if _current_player_proc is player_proc:
+                    _current_player_proc = None
+
+        audio_queue.task_done()
+        if audio_queue.empty():
+            set_is_playing(False)

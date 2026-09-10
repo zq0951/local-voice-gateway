@@ -8,13 +8,15 @@ import threading
 import uvicorn
 import httpx
 
+import wave
 import config
+from utils.audio import calc_rms
 from core.playback import GLOBAL_AUDIO_QUEUE, playback_worker, play_ding, get_is_playing
 from core.vad import record_audio_until_silence, create_microphone_stream, is_enrolling_event
 from core.speaker_verifier import SPEAKER_VERIFIER
 from core.wakeword import WAKEWORD_DETECTOR
 from core.stt import transcribe_audio
-from core.tts import init_tts_engine, synthesize_and_enqueue, enqueue_tts
+from core.tts import init_tts_engine, synthesize_and_enqueue, enqueue_tts, is_tts_active
 from core.audio_device import AudioDeviceManager
 from core.enrollment import VOICEPRINT_MANAGER
 from api.server import app, broadcast_event
@@ -81,6 +83,52 @@ async def query_agent_and_speak(user_text: str, speaker_name: str, emotion: str 
     except Exception as e:
         logger.error(f"调用 Agent 出错: {e}")
 
+def run_dialog_session(loop, temp_wav_path, initial_speaker="authorized_user"):
+    """持续对话交互窗口：会话保持 active_window 秒，期间免唤醒直接交流"""
+    active_window = getattr(config, "WAKE_WORD_ACTIVE_WINDOW", 25)
+    logger.info(f"✨ 进入持续对话窗口 (会话保持 {active_window}s，在此期间可免唤醒直接交流)...")
+
+    # 1. 缓冲等待 ding 提示音播放完毕，确保录音不被自身音效干扰
+    t_wait = time.time()
+    while get_is_playing() and (time.time() - t_wait < 1.2):
+        time.sleep(0.03)
+    time.sleep(0.12) # 避开扬声器余震
+
+    while True:
+        if is_enrolling_event.is_set():
+            break
+
+        # 半双工保护：若扬声器正在准备或朗读回复，等待其播报完毕
+        if config.AUDIO_DUPLEX_MODE == "half" and is_tts_active():
+            while is_tts_active():
+                time.sleep(0.05)
+            time.sleep(0.2)
+
+        # 2. 录制用户语音指令（等待开口超时为 active_window 秒）
+        audio_path, _ = record_audio_until_silence(temp_wav_path, listen_timeout=active_window)
+        if not audio_path:
+            logger.info(f"💤 [{active_window}s 静默超时]: 未检测到新语音指令，退出持续对话，返回待机。")
+            break
+
+        # 3. 语音识别
+        stt_res = loop.run_until_complete(transcribe_audio(audio_path))
+        text = stt_res.get("text", "").strip()
+        is_speech = stt_res.get("is_speech", True)
+        if not text or not is_speech:
+            logger.info("💭 [未识别到有效人声内容/非语音事件]，保持会话继续聆听...")
+            continue
+
+        # 4. 广播事件并交由 Agent 思考回复
+        speaker_display = initial_speaker or "authorized_user"
+        logger.info(f"🗣️ 用户输入: '{text}' (情绪={stt_res.get('emotion')})")
+        loop.run_until_complete(broadcast_event({
+            "event": "speech_recognized",
+            "speaker": speaker_display,
+            "text": text,
+            "emotion": stt_res.get("emotion")
+        }))
+        loop.run_until_complete(query_agent_and_speak(text, speaker_display, stt_res.get("emotion")))
+
 def run_api_server():
     """在后台独立线程启动 FastAPI 服务"""
     uvicorn.run(app, host="0.0.0.0", port=config.GATEWAY_PORT, log_level="warning")
@@ -120,10 +168,10 @@ def main_voice_loop():
                 time.sleep(0.3)
                 continue
 
-            # 半双工防打架：扬声器播报期间优雅等待，杜绝空转与日志刷屏
-            if config.AUDIO_DUPLEX_MODE == "half" and get_is_playing():
+            # 半双工防打架：扬声器播报或 TTS 合成期间优雅等待，杜绝抢占声卡导致发声失败
+            if config.AUDIO_DUPLEX_MODE == "half" and is_tts_active():
                 if not was_playing:
-                    logger.info("⏸️ [半双工]: 扬声器正在播报，暂停麦克风录制...")
+                    logger.info("⏸️ [半双工]: 扬声器正在准备/播报回复，暂停麦克风录制...")
                     was_playing = True
                 time.sleep(0.2)
                 continue
@@ -171,9 +219,8 @@ def main_voice_loop():
                             logger.info(f"🔄 检测到触发模式已热切换为 [{curr_eff}]，唤醒监听器退出并切换")
                             break
 
-                        if config.AUDIO_DUPLEX_MODE == "half" and get_is_playing():
-                            time.sleep(0.1)
-                            continue
+                        if config.AUDIO_DUPLEX_MODE == "half" and is_tts_active():
+                            break
 
                         raw = proc.stdout.read(chunk_bytes)
                         if not raw or len(raw) < chunk_bytes:
@@ -199,55 +246,7 @@ def main_voice_loop():
                         except: pass
 
                 if triggered:
-                    active_window = getattr(config, "WAKE_WORD_ACTIVE_WINDOW", 25)
-                    logger.info(f"✨ 唤醒成功! 进入持续对话窗口 (会话保持 {active_window}s，在此期间可免唤醒直接交流)...")
-
-                    # 1. 缓冲等待 ding 提示音播放完毕，确保录音不被自身音效干扰或误杀
-                    t_wait = time.time()
-                    while get_is_playing() and (time.time() - t_wait < 1.2):
-                        time.sleep(0.03)
-                    time.sleep(0.12) # 避开扬声器余震
-
-                    while True:
-                        if is_enrolling_event.is_set():
-                            break
-
-                        # 半双工保护：若扬声器正在朗读回复，等待其播报完毕
-                        if config.AUDIO_DUPLEX_MODE == "half" and get_is_playing():
-                            while get_is_playing():
-                                time.sleep(0.05)
-                            time.sleep(0.2)
-
-                        # 2. 录制用户语音指令（等待开口超时为 active_window 秒）
-                        audio_path, _ = record_audio_until_silence(temp_wav_path, listen_timeout=active_window)
-                        if not audio_path:
-                            logger.info(f"💤 [{active_window}s 静默超时]: 未检测到新语音指令，退出持续对话，返回关键词待机。")
-                            break
-
-                        # 3. 语音识别
-                        stt_res = loop.run_until_complete(transcribe_audio(audio_path))
-                        text = stt_res.get("text", "").strip()
-                        is_speech = stt_res.get("is_speech", True)
-                        if not text or not is_speech:
-                            logger.info("💭 [未识别到有效人声内容/非语音事件]，保持会话继续聆听...")
-                            continue
-
-                        # 4. 主动退出词检测
-                        exit_words = ["退下", "再见", "闭嘴", "没事了", "休眠", "退出", "拜拜", "不需要了"]
-                        if any(w in text for w in exit_words):
-                            logger.info(f"👋 收到用户退出指令: '{text}'，结束本次持续对话。")
-                            play_ding()
-                            break
-
-                        # 5. 广播事件并交由 Agent 思考回复
-                        logger.info(f"🗣️ 用户输入: '{text}' (情绪={stt_res.get('emotion')})")
-                        loop.run_until_complete(broadcast_event({
-                            "event": "speech_recognized",
-                            "speaker": "authorized_user",
-                            "text": text,
-                            "emotion": stt_res.get("emotion")
-                        }))
-                        loop.run_until_complete(query_agent_and_speak(text, "user", stt_res.get("emotion")))
+                    run_dialog_session(loop, temp_wav_path, initial_speaker="authorized_user")
 
             # -------------------------------------------------------------
             # 模式 2: 声纹被动常开模式 (单兵书房沉浸首选，需有已注册声纹)
@@ -285,13 +284,26 @@ def main_voice_loop():
                     loop.run_until_complete(query_agent_and_speak(text, speaker, stt_res.get("emotion")))
 
             # -------------------------------------------------------------
-            # 模式 3: 混合模式 (关键词唤醒 + 声纹二次鉴权)
+            # 模式 3: 混合模式 (二选一触发: 唤醒词命中 OR 主人声纹免唤醒直接触发)
             # -------------------------------------------------------------
             else: # hybrid
-                logger.info("🎧 [混合双模]: 监听唤醒词中...")
+                if last_mode != effective_mode:
+                    logger.info(f"🎧 [混合双模 (二选一触发)]: 正在并发监听【唤醒词 '{config.WAKE_WORD_MODEL}'】与【主人声纹免唤醒】...")
+                    last_mode = effective_mode
+
                 proc = create_microphone_stream()
-                chunk_bytes = 1280 * config.SAMPLE_WIDTH
-                triggered = False
+                chunk_bytes = 1280 * config.SAMPLE_WIDTH # 80ms chunk
+                trigger_type = None
+                matched_speaker = None
+
+                vad_frames = []
+                pre_buffer = []
+                is_speaking = False
+                silence_start = None
+                speech_start = None
+                noise_floor = 0.0
+                alpha = 0.05
+                calibrated_threshold = config.MIN_ENERGY_THRESHOLD
 
                 try:
                     while True:
@@ -299,20 +311,89 @@ def main_voice_loop():
                             time.sleep(0.2)
                             break
 
-                        if config.AUDIO_DUPLEX_MODE == "half" and get_is_playing():
-                            time.sleep(0.1)
-                            continue
+                        if config.TRIGGER_MODE != "hybrid":
+                            break
+
+                        if config.AUDIO_DUPLEX_MODE == "half" and is_tts_active():
+                            break
 
                         raw = proc.stdout.read(chunk_bytes)
                         if not raw or len(raw) < chunk_bytes:
                             break
-                        
+
+                        # -------------------------------------------------
+                        # 触发路径 1: 关键词唤醒检测 (OpenWakeWord)
+                        # -------------------------------------------------
                         is_hit, model_name, score = WAKEWORD_DETECTOR.process_chunk(raw)
                         if is_hit:
-                            triggered = True
-                            logger.info(f"🎯 [混合模式] 唤醒词命中! ({model_name})")
+                            trigger_type = "wakeword"
+                            logger.info(f"🎯 [混合模式 - 路径1] 唤醒词命中! ({model_name}, 置信度={score:.2f})")
                             play_ding()
+                            loop.run_until_complete(broadcast_event({
+                                "event": "wake_word_detected", 
+                                "model": model_name, 
+                                "score": score
+                            }))
                             break
+
+                        # -------------------------------------------------
+                        # 触发路径 2: 主人声纹免唤醒检测 (VAD 人声切片 + CAM++ 声纹)
+                        # -------------------------------------------------
+                        rms = calc_rms(raw, config.SAMPLE_WIDTH)
+                        if noise_floor == 0:
+                            noise_floor = rms
+                        else:
+                            noise_floor = (1 - alpha) * noise_floor + alpha * rms
+                        calibrated_threshold = max(config.MIN_ENERGY_THRESHOLD, noise_floor * config.VAD_MULTIPLIER)
+
+                        now = time.time()
+                        if not is_speaking:
+                            pre_buffer.append(raw)
+                            if len(pre_buffer) > 4: # 保留 320ms 前置静音/辅音缓冲
+                                pre_buffer.pop(0)
+
+                            if rms > calibrated_threshold and rms > config.MIN_ENERGY_THRESHOLD:
+                                is_speaking = True
+                                speech_start = now
+                                silence_start = None
+                                vad_frames.extend(pre_buffer)
+                                pre_buffer = []
+                        else:
+                            vad_frames.append(raw)
+                            if rms < (calibrated_threshold * 0.8):
+                                if silence_start is None:
+                                    silence_start = now
+                                elif now - silence_start > config.SILENCE_TIMEOUT:
+                                    # 用户整句话讲完了！
+                                    total_duration = len(vad_frames) * 0.08
+                                    if total_duration >= 0.8: # 至少 0.8s 有效音频段
+                                        with wave.open(temp_wav_path, 'wb') as wf:
+                                            wf.setnchannels(config.CHANNELS)
+                                            wf.setsampwidth(config.SAMPLE_WIDTH)
+                                            wf.setframerate(config.SAMPLE_RATE)
+                                            wf.writeframes(b''.join(vad_frames))
+
+                                        is_matched, speaker, vp_score = SPEAKER_VERIFIER.verify(temp_wav_path)
+                                        if is_matched:
+                                            trigger_type = "voiceprint"
+                                            matched_speaker = speaker
+                                            logger.info(f"✨ [混合模式 - 路径2] 主人声纹免唤醒直接触发! ({speaker}, 置信度={vp_score:.2f})")
+                                            play_ding()
+                                            break
+                                        else:
+                                            logger.debug(f"混合模式: 说话人非主人 (最佳: {speaker}, 分数={vp_score:.2f})，继续监听")
+                                    # 重置 VAD 状态
+                                    is_speaking = False
+                                    vad_frames = []
+                                    silence_start = None
+                            else:
+                                silence_start = None
+
+                            if speech_start and (now - speech_start > config.MAX_RECORD_SECONDS):
+                                is_speaking = False
+                                vad_frames = []
+                                silence_start = None
+
                 finally:
                     try:
                         proc.terminate()
@@ -321,26 +402,28 @@ def main_voice_loop():
                         try: proc.kill()
                         except: pass
 
-                if triggered:
-                    audio_path, _ = record_audio_until_silence(temp_wav_path)
-                    if audio_path:
-                        is_matched, speaker, score = SPEAKER_VERIFIER.verify(audio_path)
-                        stt_res = loop.run_until_complete(transcribe_audio(audio_path))
-                        text = stt_res.get("text", "").strip()
-                        is_speech = stt_res.get("is_speech", True)
-                        if text and is_speech:
-                            loop.run_until_complete(broadcast_event({
-                                "event": "speech_recognized",
-                                "speaker": speaker if is_matched else "guest",
-                                "text": text,
-                                "score": score,
-                                "emotion": stt_res.get("emotion")
-                            }))
-                            # 一人一权安全把关：声纹库有已录入用户时，仅放行认证主人，拒绝访客指令
-                            if is_matched or not bool(SPEAKER_VERIFIER.centroids):
-                                loop.run_until_complete(query_agent_and_speak(text, speaker if is_matched else "user", stt_res.get("emotion")))
-                            else:
-                                logger.warning(f"🛡️ [声纹未通过]: 说话人被判定为访客 (置信度={score:.2f} < 门限)，混合模式安全拦截，不予调用 Agent")
+                # ---------------------------------------------------------
+                # 触发后交互流 (二选一)
+                # ---------------------------------------------------------
+                if trigger_type == "wakeword":
+                    # 路径 1: 喊了唤醒词 -> 无论声纹直接进入持续对话交互
+                    run_dialog_session(loop, temp_wav_path, initial_speaker="authorized_user")
+
+                elif trigger_type == "voiceprint":
+                    # 路径 2: 声纹直接触发 -> 识别刚才录下的整句话并直接回复
+                    stt_res = loop.run_until_complete(transcribe_audio(temp_wav_path))
+                    text = stt_res.get("text", "").strip()
+                    is_speech = stt_res.get("is_speech", True)
+                    if text and is_speech:
+                        logger.info(f"🗣️ [主人免唤醒指令]: '{text}' (说话人={matched_speaker})")
+                        loop.run_until_complete(broadcast_event({
+                            "event": "speech_recognized",
+                            "speaker": matched_speaker,
+                            "text": text,
+                            "emotion": stt_res.get("emotion")
+                        }))
+                        loop.run_until_complete(query_agent_and_speak(text, matched_speaker, stt_res.get("emotion")))
+                        # 声纹免唤醒一问一答完成后直接回归待机，不进入 25s 静默超时
 
         except KeyboardInterrupt:
             logger.info("👋 收到退出信号")

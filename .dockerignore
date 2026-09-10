@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+ENV
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.wav
+*.pcm
+temp_*.wav
+models/funasr
+models/moss_tts/hf_cache

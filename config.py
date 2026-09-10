@@ -51,7 +51,7 @@ CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
 # 双工模式: "full" (全双工，支持打断) 或 "half" (半双工，播报时麦克风静音)
 AUDIO_DUPLEX_MODE = os.getenv("AUDIO_DUPLEX_MODE", "half")
 
-# 硬件播报采样率与声道
+# 硬件播报采样率与声道 (默认 44100Hz 对齐 EMEET M1A 等绝大多数 USB 音箱物理 DAC，通过 torchaudio 高保真重采样)
 HW_SAMPLE_RATE = int(os.getenv("HW_SAMPLE_RATE", "44100"))
 PLAYBACK_CHANNELS = int(os.getenv("PLAYBACK_CHANNELS", "2"))
 

@@ -163,10 +163,10 @@ class AudioDeviceManager:
         best_cap = cls.select_best_device(cap_devs, os.getenv("CAPTURE_DEVICE_KEYWORD"))
         best_play = cls.select_best_device(play_devs, os.getenv("PLAYBACK_DEVICE_KEYWORD"))
 
-        cap_target = f"hw:{best_cap['card_id']},{best_cap['device_num']}" if best_cap else "hw:0,0"
-        play_target = f"hw:{best_play['card_id']},{best_play['device_num']}" if best_play else "hw:0,0"
-        cap_card_id = best_cap['card_id'] if best_cap else "0"
-        play_card_id = best_play['card_id'] if best_play else "0"
+        cap_target = f"hw:{best_cap['card_num']},{best_cap['device_num']}" if best_cap else "hw:0,0"
+        play_target = f"hw:{best_play['card_num']},{best_play['device_num']}" if best_play else "hw:0,0"
+        cap_card_id = best_cap['card_num'] if best_cap else "0"
+        play_card_id = best_play['card_num'] if best_play else "0"
 
         logger.info(f"🎙️ 选定最佳录音硬件: {best_cap['card_desc'] if best_cap else '默认'} -> {cap_target}")
         logger.info(f"🔊 选定最佳播放硬件: {best_play['card_desc'] if best_play else '默认'} -> {play_target}")

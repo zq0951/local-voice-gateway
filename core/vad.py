@@ -98,12 +98,25 @@ def create_microphone_stream():
     else:
         return PyAudioStreamReader(SAMPLE_RATE, CHANNELS, CHUNK_SIZE)
 
+def check_tts_active():
+    try:
+        from core.tts import is_tts_active
+        return is_tts_active()
+    except Exception:
+        from core.playback import get_is_playing
+        return get_is_playing()
+
 def record_audio_until_silence(output_filename="temp_recorded.wav", allow_enrolling=False, listen_timeout=None):
     """
     使用自适应动态阈值 VAD 录音直到静音
     listen_timeout: 尚未开始说话前的最大等待时长(秒)，超时返回 None
     返回: (output_path, trigger_rms)
     """
+    if AUDIO_DUPLEX_MODE == "half" and check_tts_active():
+        while check_tts_active():
+            time.sleep(0.05)
+        time.sleep(0.2)
+
     cleanup_arecord()
     
     proc = create_microphone_stream()
@@ -137,11 +150,10 @@ def record_audio_until_silence(output_filename="temp_recorded.wav", allow_enroll
                     elif now - wait_start > listen_timeout:
                         break
 
-                if AUDIO_DUPLEX_MODE == "half" and get_is_playing():
-                    time.sleep(0.04)
-                    continue
+                if AUDIO_DUPLEX_MODE == "half" and check_tts_active():
+                    break
             else:
-                if AUDIO_DUPLEX_MODE == "half" and get_is_playing():
+                if AUDIO_DUPLEX_MODE == "half" and check_tts_active():
                     # 已在说话中途若被扬声器抢断则截断保存
                     break
 

@@ -12,6 +12,7 @@ from config import HW_SAMPLE_RATE, PLAYBACK_CHANNELS, MOSS_MODEL_DIR, MOSS_CACHE
 from utils.text import filter_symbols
 from core.playback import GLOBAL_AUDIO_QUEUE
 
+
 logger = logging.getLogger("LocalVoiceGateway")
 
 # 强制使用 soundfile 替代 torchaudio.load / torchaudio.save，彻底消除 TorchCodec 依赖
@@ -42,6 +43,8 @@ def apply_offline_patches(moss_path, hf_cache_path):
     os.environ["HF_HUB_OFFLINE"] = "1"
     if hf_cache_path:
         os.environ["HF_HOME"] = hf_cache_path
+        # 确保动态模块缓存写在系统全局临时可写目录，彻底杜绝只读文件系统异常
+        os.environ["HF_MODULES_CACHE"] = "/tmp/transformers_modules"
 
     try:
         import transformers
@@ -246,17 +249,22 @@ def init_tts_engine():
     try:
         from moss_tts_nano_runtime import NanoTTSService
         import threading
-        torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", "4")))
+        cpu_count = os.cpu_count() or 4
+        default_threads = min(10, max(4, cpu_count - 1))
+        torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", str(default_threads))))
         
         # 智能动态定位本地 snapshot 真实物理路径 (自适应 ModelScope 与 HuggingFace 结构)
         search_root = hf_cache_dir or moss_dir
         ckpt_path = _find_model_directory(search_root, "MOSS-TTS-Nano")
         tok_path = _find_model_directory(search_root, "Audio-Tokenizer")
 
+        output_dir = os.path.join(base_dir, "temp_tts_audio")
+        os.makedirs(output_dir, exist_ok=True)
         kwargs = {
             "device": "cpu",
             "dtype": "float32",
-            "attn_implementation": "sdpa"
+            "attn_implementation": "eager",
+            "output_dir": output_dir,
         }
         if ckpt_path and os.path.exists(ckpt_path):
             kwargs["checkpoint_path"] = ckpt_path
@@ -274,7 +282,7 @@ def init_tts_engine():
         def _async_warmup():
             try:
                 MOSS_SERVICE.get_model()
-                MOSS_SERVICE._load_audio_tokenizer_locked(tts_attn_implementation="sdpa")
+                MOSS_SERVICE._load_audio_tokenizer_locked(tts_attn_implementation="eager")
                 logger.info("⚡ MOSS-TTS 内存预热完成，已进入毫秒发音状态")
             except Exception as ex:
                 logger.warning(f"MOSS-TTS 预热异常: {ex}", exc_info=True)
@@ -288,50 +296,104 @@ def init_tts_engine():
     return MOSS_SERVICE
 
 def synthesize_and_enqueue(text: str, check_task_valid=None):
-    """合成语音并将生成的双声道 PCM 推入播放队列"""
+    """整段自然合成语音并将生成的双声道 PCM 推入播放队列 (保证全局语气语调连贯一致)"""
     clean_text = filter_symbols(text)
     if not clean_text:
         return False
 
-    logger.info(f"🔊 [TTS 请求]: {clean_text}")
+    logger.info(f"🔊 [TTS 请求]: {clean_text} (共 {len(clean_text)} 字)")
 
     if MOSS_SERVICE is None:
         init_tts_engine()
 
-    if MOSS_SERVICE:
-        try:
-            result = MOSS_SERVICE.synthesize(text=clean_text)
-            if check_task_valid and not check_task_valid():
-                logger.info("🚫 [TTS 取消]: 合成完成但在推入播放前任务已被打断，丢弃生成的音频帧")
-                return False
-
-            waveform = result["waveform"]
-            sr = result["sample_rate"]
-
-            if sr != HW_SAMPLE_RATE:
-                waveform = torchaudio.functional.resample(waveform, sr, HW_SAMPLE_RATE)
-
-            # 异常长度截断保护 (防止 MOSS-TTS 偶发幻觉产生超长尾音)
-            max_allowed_seconds = len(clean_text) * 0.4 + 2.0
-            max_allowed_frames = int(max_allowed_seconds * HW_SAMPLE_RATE)
-            if waveform.shape[-1] > max_allowed_frames:
-                waveform = waveform[..., :max_allowed_frames]
-
-            if waveform.shape[0] == 1 and PLAYBACK_CHANNELS == 2:
-                waveform = waveform.repeat(2, 1)
-
-            pcm_data = (torch.clamp(waveform, -1.0, 1.0) * 32767).to(torch.int16).cpu().numpy().T.tobytes()
-
-            if check_task_valid and not check_task_valid():
-                return False
-
-            GLOBAL_AUDIO_QUEUE.put(pcm_data)
-            return True
-        except Exception as e:
-            logger.error(f"TTS 合成出错: {e}")
-            return False
-    else:
+    if not MOSS_SERVICE:
         logger.warning(f"TTS 服务未就绪，模拟播报: {clean_text}")
+        return False
+
+    if check_task_valid and not check_task_valid():
+        logger.info("🚫 [TTS 取消]: 任务开始前已被抢占打断")
+        return False
+
+    start_time = time.monotonic()
+    try:
+        if len(clean_text) > 20:
+            logger.info(f"⏳ [MOSS-TTS 推理中]: 正在为 {len(clean_text)} 字长文本生成高保真语音 (CPU 推理约需 5~10 秒，请稍候)...")
+        # 黄金推理组合：
+        # 1. voice_clone_max_text_tokens=75：遵循 MOSS-TTS-Nano 最佳声学窗口自然分句，杜绝超长单句导致模型发散死循环
+        # 2. tts_max_batch_size=1：强制逐句独立串行生成，彻底消灭 left-pad padding（padding 长度为 0），杜绝数值溢出
+        # 3. attn_implementation='eager'：在 CPU 上使用经典高精度矩阵乘法，杜绝 SDPA 产生的 NaN
+        result = MOSS_SERVICE.synthesize(
+            text=clean_text,
+            voice_clone_max_text_tokens=75,
+            tts_max_batch_size=1,
+            max_new_frames=200,
+            attn_implementation="eager"
+        )
+        
+        if check_task_valid and not check_task_valid():
+            logger.info("🚫 [TTS 取消]: 合成完成但在推入播放前任务已被打断，丢弃生成的音频帧")
+            return False
+
+        waveform = result["waveform"]
+        sr = result["sample_rate"]
+        cost_s = time.monotonic() - start_time
+
+        # 杜绝任何 NaN/Inf 导致静音：若波形异常自动清除非法数值点
+        if torch.isnan(waveform).any() or torch.isinf(waveform).any():
+            logger.warning("⚠️ 检测到波形包含非数值(NaN/Inf)，执行平滑修复并清除非数值点")
+            waveform = torch.nan_to_num(waveform, nan=0.0, posinf=0.8, neginf=-0.8)
+
+        if sr != HW_SAMPLE_RATE:
+            waveform = torchaudio.functional.resample(waveform, sr, HW_SAMPLE_RATE)
+
+        # 1. 异常长度截断保护 (放宽安全裕量，防止长篇笑话或正常慢速朗读被误截断)
+        max_allowed_seconds = max(len(clean_text) * 0.60 + 6.0, 20.0)
+        max_allowed_frames = int(max_allowed_seconds * HW_SAMPLE_RATE)
+        if waveform.shape[-1] > max_allowed_frames:
+            logger.warning(f"⚠️ 音频时长超过安全阈值 ({waveform.shape[-1]/HW_SAMPLE_RATE:.1f}s > {max_allowed_seconds:.1f}s)，执行尾部保护截断")
+            waveform = waveform[..., :max_allowed_frames]
+
+        # 2. 尾部绝对静音修剪 (保留 0.25s 自然空间余音，避免尾字掐头)
+        if waveform.dim() > 1:
+            mono = waveform.mean(dim=0)
+        else:
+            mono = waveform
+        non_silent = torch.nonzero(mono.abs() > 0.002)
+        if non_silent.numel() > 0:
+            last_idx = non_silent[-1].item()
+            end_idx = min(last_idx + int(HW_SAMPLE_RATE * 0.25), waveform.shape[-1])
+            waveform = waveform[..., :end_idx]
+
+        # 3. 声道适配与 PCM 转换
+        if waveform.shape[0] == 1 and PLAYBACK_CHANNELS == 2:
+            waveform = waveform.repeat(2, 1)
+
+        max_amplitude = float(waveform.abs().max().item())
+        mean_amplitude = float(waveform.abs().mean().item())
+        audio_len_s = waveform.shape[-1] / HW_SAMPLE_RATE
+        logger.info(f"📊 [TTS 音频质检]: 时长={audio_len_s:.1f}s, 最大幅值={max_amplitude:.4f}, 平均幅值={mean_amplitude:.4f}")
+        if max_amplitude < 0.001:
+            logger.error("❌ [TTS 音频质检失败]: 模型生成的波形全为静音(幅值接近0)，请检查模型输入！")
+
+        pcm_data = (torch.clamp(waveform, -1.0, 1.0) * 32767).to(torch.int16).cpu().numpy().T.tobytes()
+
+        # 4. 及时清理临时音频文件
+        audio_path = result.get("audio_path")
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
+
+        if check_task_valid and not check_task_valid():
+            return False
+
+        logger.info(f"✅ [TTS 合成完成]: 音频 {audio_len_s:.1f}s, 推理耗时 {cost_s:.2f}s, 准备发声")
+
+        GLOBAL_AUDIO_QUEUE.put(pcm_data)
+        return True
+    except Exception as e:
+        logger.error(f"TTS 合成出错: {e}")
         return False
 
 # ==============================================================================
@@ -356,7 +418,24 @@ def _notify_event(event_dict):
         except Exception as e:
             logger.debug(f"广播 TTS 事件异常: {e}")
 
+_is_synthesizing = False
+
+def is_tts_active():
+    """判断当前是否有正在排队、合成中或物理播放中的 TTS 任务"""
+    global _is_synthesizing
+    if _is_synthesizing:
+        return True
+    if not _tts_task_queue.empty():
+        return True
+    from core.playback import get_is_playing, GLOBAL_AUDIO_QUEUE
+    if not GLOBAL_AUDIO_QUEUE.empty():
+        return True
+    if get_is_playing():
+        return True
+    return False
+
 def _tts_worker_loop():
+    global _is_synthesizing
     logger.info("🧵 [TTS Worker]: 异步后台合成队列就绪")
     while True:
         try:
@@ -371,8 +450,12 @@ def _tts_worker_loop():
             # 广播正在生成语音状态
             _notify_event({"event": "tts_generating", "text": text, "task_id": task_id})
 
-            # 执行模型推理合成 (单线程安全隔离，绝不占死主线程)
-            success = synthesize_and_enqueue(text, check_task_valid=lambda: task_id == _current_task_id)
+            _is_synthesizing = True
+            try:
+                # 执行模型推理合成 (单线程安全隔离，绝不占死主线程)
+                success = synthesize_and_enqueue(text, check_task_valid=lambda: task_id == _current_task_id)
+            finally:
+                _is_synthesizing = False
 
             with _task_id_lock:
                 is_stale = (task_id != _current_task_id)
@@ -387,6 +470,7 @@ def _tts_worker_loop():
 
             _tts_task_queue.task_done()
         except Exception as e:
+            _is_synthesizing = False
             logger.error(f"TTS Worker 异常: {e}")
             time.sleep(0.1)
 

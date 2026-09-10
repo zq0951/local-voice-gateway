@@ -11,7 +11,7 @@
 1. **双模智能感知 (Dual-Mode Trigger)**：
    - **关键词唤醒模式 (`wake_word`)**：集成轻量级 OpenWakeWord 引擎。适合开麦打游戏、看电影、多人聚会等嘈杂环境，彻底消灭误触发。
    - **声纹被动常开模式 (`voiceprint_passive`)**：自适应 VAD 检测人声，只对已录入的主人声纹做出响应，享受无感自然的直觉对话。
-   - **混合模式 (`hybrid`)**：唤醒词激活的同时识别说话人身份，实现一人一权的个性化交互。
+   - **混合模式 (`hybrid`)**：双通道并发监听（二选一触发）：既支持说唤醒词（如“Hey Jarvis”）激活，也支持主人直接说话免唤醒直触发，兼顾全场景极速响应。
 2. **CAM++ 毫秒级声纹识别**：
    - 基于达摩院 CAM++ ONNX 模型与 Kaldi Fbank 特征提取，支持多用户声纹特征聚类与动态门限。
    - 识别结果自动附带 `[说话人:xxx]` 标签，可直接作为 Prompt 注入给大模型。
@@ -76,3 +76,58 @@
   ```
 
 网关默认监听 `http://0.0.0.0:8765`，并在控制台实时输出人声活动与事件。系统将自动根据当前操作系统（Linux ALSA vs Windows PyAudio）加载最佳声卡通道与设备防独占机制。
+
+---
+
+## 🐳 Docker 容器化部署
+
+针对 Linux / NAS / 迷你主机服务器常驻场景，项目提供了一套低延迟、声卡透传的容器化方案。
+
+### 1. 构建镜像
+
+在项目根目录下构建针对 CPU 深度优化的语音网关镜像（已预配置国内清华镜像源与 CPU 专用轻量 PyTorch）：
+
+```bash
+docker compose build
+# 或者单命令原生构建：
+# docker build -t local-voice-gateway:latest .
+```
+
+### 2. 启动容器
+
+#### 方式 A：一键全栈启动（默认推荐：网关 + FunASR 识别服务一键拉起）
+针对新机器或宿主机未安装 FunASR 的环境，直接运行：
+
+```bash
+docker compose up
+# 或后台守护运行：
+# docker compose up -d
+```
+
+#### 方式 B：仅启动语音网关容器（若已在宿主机独立运行 FunASR）
+若宿主机本地已通过外部进程启动了 FunASR（`127.0.0.1:10095`），只需启动网关容器：
+
+```bash
+docker compose up voice-gateway
+```
+
+### 3. 容器状态检查与日志查看
+
+```bash
+# 查看网关实时运行日志与声学事件流
+docker compose logs -f voice-gateway
+
+# 停止容器
+docker compose down
+```
+
+### 4. 容器化核心配置与声卡透传原理说明
+
+- **硬件声卡透传 (`devices: ["/dev/snd:/dev/snd"]` + `privileged: true`)**：
+  使容器具备直接操作宿主机麦克风阵列与音箱声卡的物理权限，零损耗无二次重采样。
+- **共享 ALSA 声卡配置 (`/etc/asound.conf:/etc/asound.conf:ro`)**：
+  自动复用宿主机校准好的录音增益与播音通道（例如 USB 麦克风音响一体机），容器内无需额外调优。
+- **网络直通模式 (`network_mode: "host"`)**：
+  消除 Docker Bridge 虚拟网桥 NAT 开销与端口映射延迟，使前端 WebUI、宿主机 STT 与外部 Agent 能以毫秒级直连 `http://127.0.0.1:8765`。
+- **外部模型目录兼容**：
+  若使用了外部目录的 MOSS-TTS 软链接，`docker-compose.yml` 已通过挂载穿透物理路径，确保离线语音合成无缝加载。

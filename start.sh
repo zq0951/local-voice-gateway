@@ -49,7 +49,7 @@ fi
 if nc -z 127.0.0.1 10095 2>/dev/null || timeout 1 bash -c "</dev/tcp/127.0.0.1/10095" 2>/dev/null; then
     echo "✅ FunASR STT 语音识别服务在线 (127.0.0.1:10095)"
 else
-    echo "⚠️ 提示: 127.0.0.1:10095 端口未监听，如需本地语音识别请确认 FunASR 容器已启动 (docker-compose up -d funasr-stt)"
+    echo "⚠️ 提示: 127.0.0.1:10095 端口未监听，如需本地语音识别请确认 FunASR STT 识别服务已启动"
 fi
 
 echo "✨ 正在启动网关主进程: $PYTHON_EXEC"
