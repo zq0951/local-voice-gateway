@@ -17,8 +17,10 @@
    - 识别结果自动附带 `[说话人:xxx]` 标签，可直接作为 Prompt 注入给大模型。
 3. **极速感官反馈机制 (`ding.pcm`)**：
    - 在人声截断且身份确认的瞬间，内存直写双声道平滑包络线提示音到声卡缓冲区，大幅消灭大模型首字生成前的“等待焦虑感”。
-4. **纯本地离线隐私**：
-   - 语音识别基于本地 SenseVoiceSmall (FunASR)，语音合成支持本地离线 TTS，不产生任何云端 API 调用费用，保护绝对声音隐私。
+4. **纯本地离线隐私 (免 Docker 原生跨平台)**：
+   - 语音识别原生支持本地 SenseVoiceSmall (FunASR) 进程内直接推理，彻底摆脱 Docker 依赖与网络端口开销，Windows / macOS / Linux 均可通过 Python 一键拉起；
+   - 同时向下兼容 WebSocket 远程识别（支持将 ASR 跑在独立 Docker 或远端 GPU 算力机上）；
+   - 语音合成支持本地离线 TTS，不产生任何云端 API 调用费用，保护绝对声音隐私。
 5. **标准接口与 Agent / MCP 原生兼容**：
    - 提供 `/v1/audio/speak` 主动播报接口、`/v1/system/mode` 动态切模接口，以及 `/v1/events` 实时事件流，可秒级包装为 MCP Server 或 DSH 插件。
 
@@ -95,20 +97,12 @@ docker compose build
 
 ### 2. 启动容器
 
-#### 方式 A：一键全栈启动（默认推荐：网关 + FunASR 识别服务一键拉起）
-针对新机器或宿主机未安装 FunASR 的环境，直接运行：
+直接在项目根目录下启动网关单容器（内置纯本地离线 ASR、声纹与 TTS 推理）：
 
 ```bash
 docker compose up
 # 或后台守护运行：
 # docker compose up -d
-```
-
-#### 方式 B：仅启动语音网关容器（若已在宿主机独立运行 FunASR）
-若宿主机本地已通过外部进程启动了 FunASR（`127.0.0.1:10095`），只需启动网关容器：
-
-```bash
-docker compose up voice-gateway
 ```
 
 ### 3. 容器状态检查与日志查看

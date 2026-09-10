@@ -55,8 +55,8 @@ exit /b 1
 :FOUND_PYTHON
 echo [Python] 选定运行时: !PYTHON_EXEC!
 
-:: 3. 检查 FunASR 语音识别服务连通性 (纯 Python 探测，毫秒级且无 PowerShell 兼容性风险)
-"!PYTHON_EXEC!" -c "import socket; s = socket.socket(); s.settimeout(0.3); res = s.connect_ex(('127.0.0.1', 10095)); print('[FunASR] 本地语音识别服务在线 (127.0.0.1:10095)' if res == 0 else '[FunASR] 提示: 10095 端口未监听 (若需识别请启动 FunASR)'); s.close()" 2>nul
+:: 3. 检查 FunASR 纯离线语音识别引擎状态 (纯 Python 探测模型目录与库)
+"!PYTHON_EXEC!" -c "import os; has_local = os.path.isdir('models/funasr/SenseVoiceSmall'); has_lib = False; (exec('try: import funasr; has_lib = True\nexcept: pass') if has_local else None); print('[FunASR] 本地原生引擎已就绪 (纯本地私有/免 Docker)' if (has_local and has_lib) else ('[FunASR] 提示: 未检测到本地模型 models/funasr/SenseVoiceSmall (请运行 python utils/download_models.py --funasr)' if not has_local else '[FunASR] 提示: 请先运行 pip install funasr 安装识别库'))" 2>nul
 
 
 echo [Gateway] 正在启动网关主进程...

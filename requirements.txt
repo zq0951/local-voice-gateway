@@ -16,6 +16,7 @@ mcp>=1.0.0
 pydantic>=2.0.0
 transformers>=4.40.0,<4.48.0
 sentencepiece>=0.1.99
+funasr>=1.1.0
 
 # Note: openwakeword is installed separately via --no-deps in install scripts
 # to prevent pulling missing pre-compiled wheels like tflite-runtime.

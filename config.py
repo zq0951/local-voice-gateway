@@ -78,8 +78,8 @@ PRE_SPEECH_BUFFER = 10
 # 本地网关暴露端口
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8765"))
 
-# STT (SenseVoice/FunASR) 服务的 WebSocket 端点
-STT_WS_URL = os.getenv("STT_WS_URL", "wss://localhost:10095")
+# 本地 FunASR / SenseVoice 离线模型路径 (纯本地进程内推理，零网络开销与端口占用)
+FUNASR_MODEL_DIR = os.getenv("FUNASR_MODEL_DIR", os.path.join(BASE_DIR, "models/funasr"))
 
 # 后端 Agent 接口 (留空或设为 "echo" 时，网关进入纯本地回环复述模式，零配置开箱即测)
 AGENT_API_URL = os.getenv("AGENT_API_URL", "echo")

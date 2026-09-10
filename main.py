@@ -15,7 +15,7 @@ from core.playback import GLOBAL_AUDIO_QUEUE, playback_worker, play_ding, get_is
 from core.vad import record_audio_until_silence, create_microphone_stream, is_enrolling_event
 from core.speaker_verifier import SPEAKER_VERIFIER
 from core.wakeword import WAKEWORD_DETECTOR
-from core.stt import transcribe_audio
+from core.stt import transcribe_audio, init_stt_engine
 from core.tts import init_tts_engine, synthesize_and_enqueue, enqueue_tts, is_tts_active
 from core.audio_device import AudioDeviceManager
 from core.enrollment import VOICEPRINT_MANAGER
@@ -150,6 +150,7 @@ def main_voice_loop():
     SPEAKER_VERIFIER.reload_profiles()
     WAKEWORD_DETECTOR.load_model()
     init_tts_engine()
+    init_stt_engine()
 
     available_models = WAKEWORD_DETECTOR.get_available_models()
     logger.info(f"🎯 唤醒词生效: [{config.WAKE_WORD_MODEL}] (阈值={config.WAKE_WORD_THRESHOLD})")

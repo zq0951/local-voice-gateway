@@ -45,11 +45,13 @@ if ! command -v arecord &>/dev/null || ! command -v aplay &>/dev/null; then
     echo "ℹ️ 提示: 未检测到 ALSA 工具 (arecord/aplay)，网关将自动启用跨平台 PyAudio 模式托管声卡"
 fi
 
-# 检查 FunASR 服务连通性 (端口 10095)
-if nc -z 127.0.0.1 10095 2>/dev/null || timeout 1 bash -c "</dev/tcp/127.0.0.1/10095" 2>/dev/null; then
-    echo "✅ FunASR STT 语音识别服务在线 (127.0.0.1:10095)"
+# 检查本地 FunASR 纯离线识别模型与库
+if [ -d "$DIR/models/funasr/SenseVoiceSmall" ] && "$PYTHON_EXEC" -c "import funasr" &>/dev/null; then
+    echo "✅ FunASR STT 语音识别: 本地原生引擎已就绪 (纯本地私有/免 Docker)"
+elif [ ! -d "$DIR/models/funasr/SenseVoiceSmall" ]; then
+    echo "⚠️ 提示: 未检测到本地模型 models/funasr/SenseVoiceSmall (可执行: $PYTHON_EXEC utils/download_models.py --funasr 下载)"
 else
-    echo "⚠️ 提示: 127.0.0.1:10095 端口未监听，如需本地语音识别请确认 FunASR STT 识别服务已启动"
+    echo "⚠️ 提示: 未检测到 funasr 库 (请在终端执行: $PYTHON_EXEC -m pip install funasr)"
 fi
 
 echo "✨ 正在启动网关主进程: $PYTHON_EXEC"

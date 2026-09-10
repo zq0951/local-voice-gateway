@@ -1,29 +1,7 @@
 services:
   # ==============================================================================
-  # 1. 语音转文字后端 (SenseVoiceSmall via FunASR)
-  # 默认与网关一同启动，一键全自动开箱即用
-  # ==============================================================================
-  funasr-stt:
-    image: registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-cpu-0.4.6
-    container_name: lvg_funasr_stt
-    restart: unless-stopped
-    network_mode: "host"
-    volumes:
-      - ./models/funasr:/workspace/models
-    working_dir: /workspace/FunASR/runtime
-    command: >
-      bash -c "bash run_server.sh 
-      --model-dir /workspace/models/SenseVoiceSmall 
-      --vad-dir /workspace/models/speech_fsmn_vad_zh-cn-16k-common-onnx 
-      --port 10095 2>&1 | tee server.log"
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 2G
-
-  # ==============================================================================
-  # 2. 本地语音交互网关 (Local Voice Gateway)
+  # 本地语音交互网关 (Local Voice Gateway - 纯本地全集成单容器)
+  # 内置唤醒词、CAM++ 声纹、FunASR SenseVoice 纯本地推理与 MOSS-TTS 语音合成
   # ==============================================================================
   voice-gateway:
     build: .
@@ -38,15 +16,13 @@ services:
       - .:/app
       - /etc/asound.conf:/etc/asound.conf:ro
       - /root/smarthome/MOSS-TTS-Nano:/root/smarthome/MOSS-TTS-Nano
+      - /root/smarthome/voice-stack/funasr-models:/root/smarthome/voice-stack/funasr-models
       - ./models/voice_profiles:/app/models/voice_profiles
     environment:
       - TRIGGER_MODE=hybrid
       - AUDIO_DUPLEX_MODE=half
       - AUTO_SPEAK=true
-      - STT_WS_URL=wss://127.0.0.1:10095
       - GATEWAY_PORT=8765
       - WAKE_WORD_MODEL=hey_jarvis
       - VOICEPRINT_THRESHOLD=0.40
     network_mode: "host"
-    depends_on:
-      - funasr-stt

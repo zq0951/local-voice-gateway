@@ -1,71 +1,114 @@
-import json
-import ssl
+import os
 import logging
 import asyncio
-import websockets
-from config import STT_WS_URL
+import config
 from utils.text import simple_t2s
 from utils.funasr_parser import parse_funasr_tags
 
 logger = logging.getLogger("LocalVoiceGateway")
 
-async def transcribe_audio(audio_file_path: str):
+class LocalSenseVoiceRecognizer:
     """
-    通过 WebSocket 请求本地 SenseVoice / FunASR 服务
-    返回: dict {"text": str, "emotion": str, "lang": str, "is_speech": bool}
-    具备 wss 与 ws 协议自适应重试容错机制，无缝兼容自签名 SSL 与普通端口
+    FunASR / SenseVoiceSmall 纯本地直接推理单例引擎
+    完全基于 Python 进程内运行，跨平台支持 Windows、macOS 与 Linux，彻底免除 Docker 与外部网络端口依赖
     """
-    candidate_urls = [STT_WS_URL]
-    if STT_WS_URL.startswith("wss://"):
-        candidate_urls.append(STT_WS_URL.replace("wss://", "ws://", 1))
-    elif STT_WS_URL.startswith("ws://"):
-        candidate_urls.append(STT_WS_URL.replace("ws://", "wss://", 1))
+    def __init__(self):
+        self.model = None
+        self.is_initialized = False
+        self.device = "cpu"
 
-    last_error = None
-    for url in candidate_urls:
-        is_wss = url.startswith("wss://")
-        ssl_context = None
-        if is_wss:
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+    def init_model(self) -> bool:
+        if self.is_initialized:
+            return True
 
         try:
-            connect_kwargs = {"open_timeout": 3.0}
-            if ssl_context:
-                connect_kwargs["ssl"] = ssl_context
-            async with websockets.connect(url, **connect_kwargs) as websocket:
-                config = {
-                    "mode": "offline",
-                    "chunk_size": [5, 10, 5],
-                    "chunk_interval": 10,
-                    "wav_name": "stt_request",
-                    "is_speaking": True,
-                    "hotwords": ""
-                }
-                await websocket.send(json.dumps(config))
+            import funasr
+            from funasr import AutoModel
+        except ImportError:
+            logger.error("❌ 未检测到 funasr 库，请先执行: pip install funasr")
+            return False
 
-                with open(audio_file_path, "rb") as f:
-                    audio_data = f.read()
-                    await websocket.send(audio_data)
+        model_base = config.FUNASR_MODEL_DIR
+        sensevoice_dir = os.path.join(model_base, "SenseVoiceSmall")
 
-                await websocket.send(json.dumps({"is_speaking": False}))
+        # 检查核心模型目录是否存在
+        if not os.path.exists(sensevoice_dir):
+            logger.error(f"❌ 未找到本地 SenseVoiceSmall 模型目录: {sensevoice_dir}")
+            return False
 
-                raw_text = ""
-                try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                    res_data = json.loads(response)
-                    raw_text = res_data.get("text", "")
-                except asyncio.TimeoutError:
-                    logger.warning("FunASR 接收超时")
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self.device = "cuda:0"
+            else:
+                self.device = "cpu"
+        except Exception:
+            self.device = "cpu"
 
-                parsed = parse_funasr_tags(raw_text)
-                parsed["text"] = simple_t2s(parsed["text"])
-                logger.info(f"📝 [STT 识别结果]: '{parsed['text']}' (情绪={parsed['emotion']}, 语言={parsed['lang']})")
-                return parsed
+        logger.info(f"⏳ 正在加载 FunASR 本地直接推理引擎 (设备: {self.device}, 模型: {sensevoice_dir}) ...")
+
+        try:
+            model_kwargs = {
+                "model": sensevoice_dir,
+                "disable_update": True,
+                "device": self.device,
+                "log_level": "ERROR"
+            }
+
+            self.model = AutoModel(**model_kwargs)
+            self.is_initialized = True
+            logger.info("✅ FunASR 本地直接推理引擎加载完成 (原生进程内推理，免 Docker/免网络端口)")
+            return True
         except Exception as e:
-            last_error = e
-            continue
+            logger.error(f"❌ 本地 FunASR 引擎加载失败: {e}")
+            self.model = None
+            self.is_initialized = False
+            return False
 
-    logger.error(f"连接 STT 服务失败 ({STT_WS_URL}): {last_error}")
-    return {"text": "", "emotion": None, "lang": None, "is_speech": False}
+    def transcribe_file(self, audio_file_path: str) -> dict:
+        """同步推理音频文件并解析富文本情绪标签"""
+        if not self.is_initialized or self.model is None:
+            logger.warning("STT 引擎尚未初始化成功，跳过识别")
+            return {"text": "", "emotion": None, "lang": None, "event": None, "is_speech": False}
+
+        try:
+            res = self.model.generate(
+                input=audio_file_path,
+                cache={},
+                language="auto",
+                use_itn=True,
+                batch_size_s=60
+            )
+            raw_text = ""
+            if isinstance(res, list) and len(res) > 0:
+                first_item = res[0]
+                if isinstance(first_item, dict):
+                    raw_text = first_item.get("text", "")
+                elif isinstance(first_item, str):
+                    raw_text = first_item
+            elif isinstance(res, dict):
+                raw_text = res.get("text", "")
+
+            parsed = parse_funasr_tags(raw_text)
+            parsed["text"] = simple_t2s(parsed["text"])
+            return parsed
+        except Exception as e:
+            logger.error(f"本地 STT 推理执行失败: {e}")
+            return {"text": "", "emotion": None, "lang": None, "event": None, "is_speech": False}
+
+LOCAL_STT_ENGINE = LocalSenseVoiceRecognizer()
+
+def init_stt_engine():
+    """网关启动时统一预载 STT 引擎"""
+    LOCAL_STT_ENGINE.init_model()
+
+async def transcribe_audio(audio_file_path: str) -> dict:
+    """
+    纯本地语音识别接口：在异步线程池中调用本地直接推理引擎，避免阻塞 asyncio 事件循环
+    """
+    if not LOCAL_STT_ENGINE.is_initialized:
+        LOCAL_STT_ENGINE.init_model()
+
+    parsed = await asyncio.to_thread(LOCAL_STT_ENGINE.transcribe_file, audio_file_path)
+    logger.info(f"📝 [STT 本地直接识别]: '{parsed['text']}' (情绪={parsed['emotion']}, 语言={parsed['lang']})")
+    return parsed
