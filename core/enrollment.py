@@ -72,8 +72,10 @@ class VoiceprintManager:
             logger.info(f"🧹 [声纹目录清扫] 已清理 {cleaned} 个残留的临时声纹录入孤儿目录")
         return cleaned
 
-    def start_session(self, speaker_name: str, total_steps: int = 5) -> dict:
+    def start_session(self, speaker_name: str, total_steps: int = 5, steps: Optional[int] = None) -> dict:
         """开启引导录入会话，通知主循环挂起麦克风占用"""
+        if steps is not None:
+            total_steps = steps
         speaker_name = speaker_name.strip()
         if not speaker_name or speaker_name.startswith(("_", ".")) or any(c in speaker_name for c in r'\/:*?"<>|'):
             raise ValueError(f"说话人名称非法或不能以 '_' / '.' 开头: '{speaker_name}'")
@@ -105,7 +107,7 @@ class VoiceprintManager:
 
         with session.lock:
             if session.current_step >= session.total_steps:
-                return {"status": "already_completed", **session.to_dict()}
+                return {"status": "ok", "success": True, "is_completed": True, "already_completed": True, **session.to_dict()}
 
             # 录制目标音频文件 (持有会话锁，确保并发请求严格排队，且 abort 必须等待录音收尾)
             step_idx = session.current_step

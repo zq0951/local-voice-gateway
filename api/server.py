@@ -48,9 +48,10 @@ load_runtime_config()
 
 app = FastAPI(title="Local Voice Gateway", version="1.0.0")
 
+cors_origins = [o.strip() for o in getattr(config, "CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins if cors_origins else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,15 +1,13 @@
 import asyncio
 import httpx
 
-try:
-    from mcp.server.mcpserver import MCPServer as FastMCP
-except ImportError:
-    from mcp.server.fastmcp import FastMCP
+import os
+from mcp.server.fastmcp import FastMCP
 
 import config
 
 mcp = FastMCP("LocalVoiceGateway")
-BASE_URL = f"http://127.0.0.1:{config.GATEWAY_PORT}"
+BASE_URL = os.getenv("GATEWAY_URL", f"http://{getattr(config, 'GATEWAY_HOST', '127.0.0.1')}:{config.GATEWAY_PORT}")
 
 @mcp.tool()
 async def speak(text: str) -> str:

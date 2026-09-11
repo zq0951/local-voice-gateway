@@ -51,10 +51,29 @@ fi
 
 echo "🐍 当前 Python 运行时: $($PYTHON_EXEC --version) ($PYTHON_EXEC)"
 
-# 确保系统 ALSA 依赖
-if ! command -v arecord &>/dev/null; then
-    echo "📦 安装系统音频基础组件 (alsa-utils)..."
-    apt-get update && apt-get install -y alsa-utils libasound2-dev portaudio19-dev
+# 确保系统音频驱动依赖
+OS_NAME="$(uname -s)"
+if [ "$OS_NAME" = "Darwin" ]; then
+    echo "🍎 检测到 macOS 运行环境 (使用 CoreAudio 驱动)"
+    if command -v brew &>/dev/null; then
+        if ! brew list portaudio &>/dev/null 2>&1; then
+            echo "📦 通过 Homebrew 安装系统音频组件 (portaudio, ffmpeg)..."
+            brew install portaudio ffmpeg 2>/dev/null || true
+        fi
+    else
+        echo "ℹ️ 提示: 若需录音播放支持，请确保已安装 portaudio (可通过 'brew install portaudio' 安装)"
+    fi
+elif [ "$OS_NAME" = "Linux" ]; then
+    if ! command -v arecord &>/dev/null; then
+        echo "📦 安装 Linux 系统音频基础组件 (alsa-utils, portaudio)..."
+        if command -v apt-get &>/dev/null; then
+            if [ "$EUID" -eq 0 ]; then
+                apt-get update && apt-get install -y alsa-utils libasound2-dev portaudio19-dev || true
+            elif command -v sudo &>/dev/null; then
+                sudo apt-get update && sudo apt-get install -y alsa-utils libasound2-dev portaudio19-dev || true
+            fi
+        fi
+    fi
 fi
 
 # 安装 pip 依赖

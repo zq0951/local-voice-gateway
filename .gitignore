@@ -53,3 +53,8 @@ temp_*.pcm
 *.swp
 *.swo
 *~
+
+# Generated assets and test cache
+assets/ding.pcm
+.pytest_cache/
+

@@ -15,14 +15,15 @@ services:
     volumes:
       - .:/app
       - /etc/asound.conf:/etc/asound.conf:ro
-      - /root/smarthome/MOSS-TTS-Nano:/root/smarthome/MOSS-TTS-Nano
-      - /root/smarthome/voice-stack/funasr-models:/root/smarthome/voice-stack/funasr-models
+      - ${MOSS_MODEL_DIR:-./models/moss_tts}:/app/models/moss_tts
+      - ${FUNASR_MODEL_DIR:-./models/funasr}:/app/models/funasr
       - ./models/voice_profiles:/app/models/voice_profiles
     environment:
-      - TRIGGER_MODE=hybrid
-      - AUDIO_DUPLEX_MODE=half
-      - AUTO_SPEAK=true
-      - GATEWAY_PORT=8765
-      - WAKE_WORD_MODEL=hey_jarvis
-      - VOICEPRINT_THRESHOLD=0.40
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=${GATEWAY_PORT:-8765}
+      - TRIGGER_MODE=${TRIGGER_MODE:-hybrid}
+      - AUDIO_DUPLEX_MODE=${AUDIO_DUPLEX_MODE:-half}
+      - AUTO_SPEAK=${AUTO_SPEAK:-true}
+      - WAKE_WORD_MODEL=${WAKE_WORD_MODEL:-hey_jarvis}
+      - VOICEPRINT_THRESHOLD=${VOICEPRINT_THRESHOLD:-0.50}
     network_mode: "host"

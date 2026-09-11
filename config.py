@@ -65,18 +65,20 @@ MOSS_CACHE_DIR = os.getenv("MOSS_CACHE_DIR", os.path.join(MOSS_MODEL_DIR, "hf_ca
 # ==============================================================================
 # 🎛️ VAD (人声活动检测) 动态阈值配置
 # ==============================================================================
-ENERGY_THRESHOLD = 600
-MIN_ENERGY_THRESHOLD = 450
-VAD_MULTIPLIER = 1.5
-SILENCE_TIMEOUT = 1.5
-MAX_RECORD_SECONDS = 30
-PRE_SPEECH_BUFFER = 10
+ENERGY_THRESHOLD = int(os.getenv("ENERGY_THRESHOLD", "600"))
+MIN_ENERGY_THRESHOLD = int(os.getenv("MIN_ENERGY_THRESHOLD", "450"))
+VAD_MULTIPLIER = float(os.getenv("VAD_MULTIPLIER", "1.5"))
+SILENCE_TIMEOUT = float(os.getenv("SILENCE_TIMEOUT", "1.5"))
+MAX_RECORD_SECONDS = int(os.getenv("MAX_RECORD_SECONDS", "30"))
+PRE_SPEECH_BUFFER = int(os.getenv("PRE_SPEECH_BUFFER", "10"))
 
 # ==============================================================================
 # 🌐 服务与后端连接端点
 # ==============================================================================
-# 本地网关暴露端口
+# 本地网关监听地址与端口 (默认 127.0.0.1 安全收敛，若 Docker/远程调试可设 GATEWAY_HOST=0.0.0.0)
+GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8765"))
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
 # 本地 FunASR / SenseVoice 离线模型路径 (纯本地进程内推理，零网络开销与端口占用)
 FUNASR_MODEL_DIR = os.getenv("FUNASR_MODEL_DIR", os.path.join(BASE_DIR, "models/funasr"))

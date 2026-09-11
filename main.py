@@ -19,7 +19,7 @@ from core.stt import transcribe_audio, init_stt_engine
 from core.tts import init_tts_engine, synthesize_and_enqueue, enqueue_tts, is_tts_active
 from core.audio_device import AudioDeviceManager
 from core.enrollment import VOICEPRINT_MANAGER
-from api.server import app, broadcast_event
+from api.server import app, sync_broadcast_event
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -121,17 +121,17 @@ def run_dialog_session(loop, temp_wav_path, initial_speaker="authorized_user"):
         # 4. 广播事件并交由 Agent 思考回复
         speaker_display = initial_speaker or "authorized_user"
         logger.info(f"🗣️ 用户输入: '{text}' (情绪={stt_res.get('emotion')})")
-        loop.run_until_complete(broadcast_event({
+        sync_broadcast_event({
             "event": "speech_recognized",
             "speaker": speaker_display,
             "text": text,
             "emotion": stt_res.get("emotion")
-        }))
+        })
         loop.run_until_complete(query_agent_and_speak(text, speaker_display, stt_res.get("emotion")))
 
 def run_api_server():
     """在后台独立线程启动 FastAPI 服务"""
-    uvicorn.run(app, host="0.0.0.0", port=config.GATEWAY_PORT, log_level="warning")
+    uvicorn.run(app, host=getattr(config, "GATEWAY_HOST", "127.0.0.1"), port=config.GATEWAY_PORT, log_level="warning")
 
 def main_voice_loop():
     """主事件循环：双模状态机 (关键词唤醒 vs 声纹被动常开 vs 混合模式)"""
@@ -232,11 +232,11 @@ def main_voice_loop():
                             triggered = True
                             logger.info(f"🎯 唤醒词命中! ({model_name}, 置信度={score:.2f})")
                             play_ding() # 毫秒级反馈
-                            loop.run_until_complete(broadcast_event({
+                            sync_broadcast_event({
                                 "event": "wake_word_detected", 
                                 "model": model_name, 
                                 "score": score
-                            }))
+                            })
                             break
                 finally:
                     try:
@@ -276,12 +276,12 @@ def main_voice_loop():
                 text = stt_res.get("text", "").strip()
                 is_speech = stt_res.get("is_speech", True)
                 if text and is_speech:
-                    loop.run_until_complete(broadcast_event({
+                    sync_broadcast_event({
                         "event": "speech_recognized",
                         "speaker": speaker,
                         "text": text,
                         "emotion": stt_res.get("emotion")
-                    }))
+                    })
                     loop.run_until_complete(query_agent_and_speak(text, speaker, stt_res.get("emotion")))
 
             # -------------------------------------------------------------
@@ -330,11 +330,11 @@ def main_voice_loop():
                             trigger_type = "wakeword"
                             logger.info(f"🎯 [混合模式 - 路径1] 唤醒词命中! ({model_name}, 置信度={score:.2f})")
                             play_ding()
-                            loop.run_until_complete(broadcast_event({
+                            sync_broadcast_event({
                                 "event": "wake_word_detected", 
                                 "model": model_name, 
                                 "score": score
-                            }))
+                            })
                             break
 
                         # -------------------------------------------------
@@ -417,12 +417,12 @@ def main_voice_loop():
                     is_speech = stt_res.get("is_speech", True)
                     if text and is_speech:
                         logger.info(f"🗣️ [主人免唤醒指令]: '{text}' (说话人={matched_speaker})")
-                        loop.run_until_complete(broadcast_event({
+                        sync_broadcast_event({
                             "event": "speech_recognized",
                             "speaker": matched_speaker,
                             "text": text,
                             "emotion": stt_res.get("emotion")
-                        }))
+                        })
                         loop.run_until_complete(query_agent_and_speak(text, matched_speaker, stt_res.get("emotion")))
                         # 声纹免唤醒一问一答完成后直接回归待机，不进入 25s 静默超时
 
