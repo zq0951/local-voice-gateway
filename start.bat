@@ -56,11 +56,11 @@ exit /b 1
 echo [Python] 选定运行时: !PYTHON_EXEC!
 
 :: 3. 检查轻量核心模型 (CAM++ 与 OpenWakeWord)
-if not exist "%DIR%\models\voice_profiles" mkdir "%DIR%\models\voice_profiles"
-if not exist "%DIR%\models\wakeword" mkdir "%DIR%\models\wakeword"
+if not exist "%DIR%\models\voice_profiles" mkdir "%DIR%\models\voice_profiles" 2>nul
+if not exist "%DIR%\models\wakeword" mkdir "%DIR%\models\wakeword" 2>nul
 
 if not exist "%DIR%\models\campplus.onnx" (
-    echo [CAM++] 检测到缺失 CAM++ 声纹模型，正在自动拉取 (约 26MB)...
+    echo [CAM++] 检测到缺失 CAM++ 声纹模型，正在自动拉取 [约 26MB]...
     "!PYTHON_EXEC!" "%DIR%\utils\download_models.py" --campplus
 )
 if not exist "%DIR%\models\wakeword\hey_jarvis_v0.1.onnx" (
@@ -68,15 +68,16 @@ if not exist "%DIR%\models\wakeword\hey_jarvis_v0.1.onnx" (
     "!PYTHON_EXEC!" "%DIR%\utils\download_models.py" --wakeword
 )
 
-:: 4. 检查 FunASR 纯离线语音识别引擎状态 (纯 Python 探测模型目录与库)
-"!PYTHON_EXEC!" -c "import os; has_local = os.path.isdir('models/funasr/SenseVoiceSmall'); has_lib = False; (exec('try: import funasr; has_lib = True\nexcept: pass') if has_local else None); print('[FunASR] 本地原生引擎已就绪 (纯本地私有/免 Docker)' if (has_local and has_lib) else ('[FunASR] 提示: 未检测到本地模型 models/funasr/SenseVoiceSmall (请运行 python utils/download_models.py --funasr)' if not has_local else '[FunASR] 提示: 请先运行 pip install funasr 安装识别库'))" 2>nul
-
+:: 4. 检查 FunASR 纯离线语音识别引擎状态
+if exist "%DIR%\models\funasr\SenseVoiceSmall" (
+    echo [FunASR] 本地原生引擎已就绪 [纯本地私有/免 Docker]
+)
 
 echo [Gateway] 正在启动网关主进程...
 "!PYTHON_EXEC!" "%DIR%\main.py" %*
 
 if %errorlevel% neq 0 (
     echo.
-    echo [Gateway] 网关进程已退出 (退出码: %errorlevel%)
+    echo [Gateway] 网关进程已退出 [退出码: %errorlevel%]
     pause
 )
