@@ -195,7 +195,7 @@ Local Voice Gateway 遵循开箱即用的 REST + WebSocket 标准契约。外部
 
 ## 🔌 与 DeepSeek Harness (DSH) 插件对接
 
-网关与 DSH 前端插件（`packages/client/ui-voice`）之间采用纯解耦的分布式架构：
+网关提供了专为 DeepSeek Harness Web 客户端打造的原生扩展插件 [**`@xp1024/dsh-voice-gateway`**](https://github.com/zq0951/dsh-voice-gateway)（已发布至 [npm](https://www.npmjs.com/package/@xp1024/dsh-voice-gateway)），两者之间采用纯解耦的分布式架构：
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -206,21 +206,35 @@ Local Voice Gateway 遵循开箱即用的 REST + WebSocket 标准契约。外部
                 │ WebSocket /v1/events (事件广播) │ 
                 ▼                               │
 ┌───────────────────────────────────────────────┴─────────────┐
-│ 🌐 DSH Web Client (浏览器运行: dsh-client-ui-voice 插件)      │
+│ 🌐 DSH Web Client (插件: @xp1024/dsh-voice-gateway)         │
+│  - 状态指示: 6 态状态机实时反馈 (idle/listening/thinking...) │
 │  - 监听 speech_recognized → 注入当前活动会话 Prompt             │
 │  - 监听 assistant/message → 调用 /v1/audio/speak 物理播报   │
 │  - 状态权威源 (SSOT): 模式与自动朗读状态始终以网关为准              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1. 插件寻址逻辑与网络要求
+### 1. 快速安装 DSH 客户端插件
+
+在已配置好的 DSH Profile（如 `web`）中直接通过 DSH 插件管理器从 npm 安装：
+
+```bash
+# 1. 在 DSH 工程目录执行安装
+dsh plugin --profile web add @xp1024/dsh-voice-gateway
+
+# 2. 启动 DSH Web 客户端
+dsh web --no-open --port 3080
+```
+启动后在 DSH 对话输入栏右侧即可直接看到麦克风控制按钮与声纹录入弹窗。
+
+### 2. 插件寻址逻辑与网络要求
 - **自动寻址**：DSH 浏览器插件默认使用当前访问地址的 `window.location.hostname + ':8765'` 连接网关（如打开 `http://127.0.0.1:3080` 时自动寻找 `http://127.0.0.1:8765`）；
 - **自定义配置覆盖**：
   - 用户可在插件下拉菜单直接点击「修改」网关地址并保存；
   - 也可通过浏览器控制台设置 `localStorage.setItem('dsh.voice.gateway_url', 'http://<IP>:8765')`；
 - **跨机 / 远程连接**：如果 DSH 运行在云端或远端服务器，浏览器与本地网关所在设备必须能够建立网络直连（如在同局域网内，或通过 FRP / Tailscale 等反向代理暴露网关端口，同时网关配置 `GATEWAY_HOST=0.0.0.0`）。
 
-### 2. MCP (Model Context Protocol) 扩展通道 (`mcp_server.py`)
+### 3. MCP (Model Context Protocol) 扩展通道 (`mcp_server.py`)
 除 REST / WS 外，网关还内置了基于 FastMCP 的标准 stdio MCP Server，可作为 DSH 工具或独立接入 Claude Desktop、Cursor 等宿主：
 
 ```bash
