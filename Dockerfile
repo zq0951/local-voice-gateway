@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir --upgrade pip -i https://pypi.tuna.tsinghua.edu.c
     typing-extensions sympy jinja2 networkx filelock \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 安装 CPU 专版 PyTorch (对齐 /root/smarthome 生产环境经过严格验证的 2.7.0+cpu 稳定版本)
+# 安装 CPU 专版 PyTorch (2.7.0+cpu 稳定版本)
 RUN pip install --no-cache-dir --default-timeout=1000 \
     torch==2.7.0+cpu torchaudio==2.7.0+cpu \
     --index-url https://download.pytorch.org/whl/cpu \
