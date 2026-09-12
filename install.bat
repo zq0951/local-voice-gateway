@@ -106,7 +106,7 @@ if exist "%DIR%\models\funasr" (
 echo.
 echo ⚠️ 未在本地检测到 FunASR 语音识别模型 (models\funasr)
 set "CHOICE_ASR=Y"
-set /p CHOICE_ASR="📥 是否立即从 ModelScope 镜像源极速下载 FunASR 模型 (约 1.2GB)? [Y/n]: "
+set /p CHOICE_ASR="📥 是否立即从 ModelScope 镜像源极速下载 FunASR 模型 [约 1.2GB]? [Y/n]: "
 if /i "%CHOICE_ASR%"=="Y" (
     "!PYTHON_EXEC!" "%DIR%\utils\download_models.py" --funasr
 ) else (
@@ -120,9 +120,9 @@ if exist "%DIR%\models\moss_tts\infer.py" (
     goto FINISH
 )
 echo.
-echo ⚠️ 未在本地检测到 MOSS-TTS 语音合成模型 (models\moss_tts)
+echo ⚠️ 未在本地检测到 MOSS-TTS 语音合成模型 [models\moss_tts]
 set "CHOICE_MOSS=N"
-set /p CHOICE_MOSS="📥 是否立即下载 MOSS-TTS 本地离线合成模型 (约 2.5GB)? [y/N]: "
+set /p CHOICE_MOSS="📥 是否立即下载 MOSS-TTS 本地离线合成模型 [约 2.5GB]? [y/N]: "
 if /i "%CHOICE_MOSS%"=="Y" (
     "!PYTHON_EXEC!" "%DIR%\utils\download_models.py" --moss
 ) else (

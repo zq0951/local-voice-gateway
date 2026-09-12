@@ -30,6 +30,24 @@ def ensure_modelscope_installed():
         ret = subprocess.call([sys.executable, "-m", "pip", "install", "modelscope", "-q"])
         return ret == 0
 
+def ensure_onnx_installed():
+    """确保当前 Python 环境已安装 onnx 及 onnxscript 导出库"""
+    missing = []
+    try:
+        import onnx
+    except ImportError:
+        missing.append("onnx>=1.16.0")
+    try:
+        import onnxscript
+    except ImportError:
+        missing.append("onnxscript>=0.1.0")
+
+    if missing:
+        print(f"📦 正在自动配置 ONNX 导出组件 ({' '.join(missing)})...")
+        ret = subprocess.call([sys.executable, "-m", "pip", "install", *missing, "-q"])
+        return ret == 0
+    return True
+
 def download_file_with_fallback(urls, dest_path, desc=""):
     """多源回退下载单个文件"""
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024:
@@ -59,59 +77,113 @@ def download_file_with_fallback(urls, dest_path, desc=""):
     return False
 
 def download_campplus(target_path=None):
-    """下载 CAM++ 声纹识别 ONNX 模型 (约 26MB)"""
+    """从魔搭 (ModelScope) 官方拉取 CAM++ 声纹识别模型原生权重并在本地转换为 ONNX 推理格式"""
     if not target_path:
         target_path = os.path.join(MODELS_DIR, "campplus.onnx")
 
     print("\n" + "=" * 60)
-    print("📥 [CAM++] 正在配置 CAM++ 声纹识别模型...")
+    print("📥 [CAM++] 正在配置 CAM++ 声纹识别模型 (ModelScope 官方源)...")
     print("=" * 60)
 
     if os.path.exists(target_path) and os.path.getsize(target_path) > 1024 * 1024:
-        print("✅ CAM++ 声纹模型已存在，跳过下载")
+        print("✅ CAM++ 声纹 ONNX 模型已就绪，跳过下载")
         return True
 
-    # 优先尝试 ModelScope Hub API
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    temp_bin = os.path.join(MODELS_DIR, "campplus_cn_common.bin")
+
+    # 1. 优先通过 ModelScope 官方 SDK 下载官方权重
+    bin_path = None
     if ensure_modelscope_installed():
         try:
             from modelscope.hub.file_download import model_file_download
-            print("⏳ 正在通过 ModelScope 拉取 CAM++ ONNX 权重...")
-            f = model_file_download('iic/speech_campplus_sv_zh-cn_16k-common', 'campplus.onnx')
-            if f and os.path.exists(f):
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                shutil.copy2(f, target_path)
-                print("✅ CAM++ 声纹模型准备就绪")
-                return True
+            print("⏳ 正在从魔搭官方 (iic/speech_campplus_sv_zh-cn_16k-common) 下载原生权重...")
+            bin_path = model_file_download('iic/speech_campplus_sv_zh-cn_16k-common', 'campplus_cn_common.bin')
         except Exception as e:
-            print(f"⚠️ ModelScope Hub 下载异常: {e}，切入直链下载...")
+            print(f"⚠️ ModelScope Hub SDK 异常: {e}，切入官方直链下载...")
 
-    # 备用直链源
-    urls = [
-        "https://modelscope.cn/models/iic/speech_campplus_sv_zh-cn_16k-common/resolve/master/campplus.onnx",
-        "https://www.modelscope.cn/api/v1/models/iic/speech_campplus_sv_zh-cn_16k-common/repo?Revision=master&FilePath=campplus.onnx"
-    ]
-    return download_file_with_fallback(urls, target_path, "CAM++ 声纹 ONNX 模型")
+    # 2. 备用官方直链 (ModelScope 官方 CDN)
+    if not bin_path or not os.path.exists(bin_path):
+        urls = [
+            "https://www.modelscope.cn/api/v1/models/iic/speech_campplus_sv_zh-cn_16k-common/repo?Revision=master&FilePath=campplus_cn_common.bin",
+            "https://modelscope.cn/models/iic/speech_campplus_sv_zh-cn_16k-common/resolve/master/campplus_cn_common.bin",
+        ]
+        if download_file_with_fallback(urls, temp_bin, "CAM++ 官方模型权重"):
+            bin_path = temp_bin
+
+    if not bin_path or not os.path.exists(bin_path):
+        print("❌ 未能从魔搭官方获取到 CAM++ 模型权重")
+        return False
+
+    # 3. 将官方 PyTorch 权重在本地导出为高性能 CPU 推理引擎 (ONNX)
+    ensure_onnx_installed()
+    print("⚙️ 官方权重就绪，正在本地导出为高性能轻量 ONNX 引擎 (约需 1~2 秒)...")
+    try:
+        import torch
+        from funasr.models.campplus.model import CAMPPlus
+
+        model = CAMPPlus(feat_dim=80, embedding_size=192)
+        state_dict = torch.load(bin_path, map_location="cpu")
+        model.load_state_dict(state_dict)
+        model.eval()
+
+        dummy_input = torch.randn(1, 100, 80)
+        export_kwargs = {
+            "input_names": ["fbank"],
+            "output_names": ["embedding"],
+            "dynamic_axes": {"fbank": {1: "time"}, "embedding": {0: "batch"}},
+            "opset_version": 14,
+        }
+        try:
+            # 明确指定 dynamo=False 使用经典 TorchScript 导出器，避免触发 onnxscript 缺失
+            torch.onnx.export(
+                model,
+                dummy_input,
+                target_path,
+                dynamo=False,
+                **export_kwargs,
+            )
+        except TypeError:
+            torch.onnx.export(
+                model,
+                dummy_input,
+                target_path,
+                **export_kwargs,
+            )
+        except Exception as ex:
+            if "onnxscript" in str(ex):
+                print("📦 检测到导出器需要 onnxscript，正在自动配置...")
+                subprocess.call([sys.executable, "-m", "pip", "install", "onnxscript", "-q"])
+                torch.onnx.export(
+                    model,
+                    dummy_input,
+                    target_path,
+                    **export_kwargs,
+                )
+            else:
+                raise ex
+
+        if os.path.exists(target_path) and os.path.getsize(target_path) > 1024 * 1024:
+            print("✅ CAM++ 声纹 ONNX 模型构建成功 (纯本地/免外部托管)！")
+            return True
+        else:
+            print("❌ 本地 ONNX 构建异常，产物大小不合预期")
+            return False
+    except Exception as e:
+        print(f"❌ 本地 ONNX 转换失败: {e}")
+        return False
 
 def download_wakewords(target_dir=None):
-    """下载 OpenWakeWord 唤醒词基础特征模型与常用关键词模型"""
+    """精准下载 OpenWakeWord 核心必备组件 (仅下载 3 个必备 ONNX 模型，杜绝多余模型与 tflite)"""
     if not target_dir:
         target_dir = os.path.join(MODELS_DIR, "wakeword")
     os.makedirs(target_dir, exist_ok=True)
 
     print("\n" + "=" * 60)
-    print("📥 [OpenWakeWord] 正在配置唤醒词模型...")
+    print("📥 [OpenWakeWord] 正在配置核心唤醒词组件...")
     print("=" * 60)
 
-    # 尝试优先调用 openwakeword 原生下载工具
-    try:
-        import openwakeword.utils
-        if hasattr(openwakeword.utils, "download_models"):
-            print("⏳ 正在通过 openwakeword 官方模块拉取基础模型...")
-            openwakeword.utils.download_models(target_directory=target_dir)
-    except Exception:
-        pass
-
-    # 必需的 3 个基础与核心模型列表
+    # 必需的 3 个基础与核心模型列表 (按需精准拉取，杜绝无用冗余)
     models = {
         "melspectrogram.onnx": [
             "https://ghproxy.net/https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx",
@@ -144,6 +216,18 @@ def download_wakewords(target_dir=None):
                 all_ok = False
         else:
             print(f"✅ 唤醒词组件已存在: {filename}")
+
+    # 清理历史无用的 .tflite 和非本项目唤醒词
+    cleaned_count = 0
+    for f in os.listdir(target_dir):
+        if f.endswith(".tflite") or (f.endswith(".onnx") and f not in models and f != "silero_vad.onnx"):
+            try:
+                os.remove(os.path.join(target_dir, f))
+                cleaned_count += 1
+            except OSError:
+                pass
+    if cleaned_count > 0:
+        print(f"🧹 已自动清理 {cleaned_count} 个历史冗余唤醒词与 .tflite 格式文件，仅保留核心按需组件！")
 
     return all_ok
 
