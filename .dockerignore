@@ -10,5 +10,15 @@ __pycache__
 *.wav
 *.pcm
 temp_*.wav
+temp_*.pcm
 models/funasr
-models/moss_tts/hf_cache
+models/moss_tts
+models/*.onnx
+models/**/*.onnx
+models/voice_profiles/*
+!models/voice_profiles/.gitkeep
+models/config/*
+!models/config/.gitkeep
+assets/*.pcm
+!assets/.gitkeep
+.pytest_cache

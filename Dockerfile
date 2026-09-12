@@ -43,6 +43,9 @@ RUN pip install --no-cache-dir --no-deps "openwakeword>=0.6.0" \
 
 COPY . .
 
+# 初始化所有运行时挂载点空目录，确保挂载点在容器内部 100% 为标准目录 (杜绝 broken symlink 与 not a directory 异常)
+RUN mkdir -p models/funasr models/moss_tts models/wakeword models/voice_profiles models/config assets
+
 EXPOSE 8765
 
 CMD ["python", "main.py"]
