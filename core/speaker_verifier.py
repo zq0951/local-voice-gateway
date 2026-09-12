@@ -43,6 +43,14 @@ class SpeakerVerifier:
         if self.session is not None:
             return True
             
+        if os.path.isdir(self.model_path):
+            logger.critical(
+                f"❌ 严重错误: {self.model_path} 是一个目录而非 ONNX 模型文件！"
+                "这通常是因为在未下载模型前直接执行了 docker compose up 触发了 Docker bind-mount 自动建目录坑。"
+                f"请先在宿主机删除该目录 ('rm -rf {self.model_path}')，并运行 'python utils/download_models.py --campplus' 拉取真实模型！"
+            )
+            return False
+
         if not os.path.exists(self.model_path):
             logger.error(f"Speaker verification model not found at {self.model_path}")
             return False

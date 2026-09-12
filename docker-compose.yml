@@ -17,6 +17,9 @@ services:
       - /etc/asound.conf:/etc/asound.conf:ro
       - ${MOSS_MODEL_DIR:-./models/moss_tts}:/app/models/moss_tts
       - ${FUNASR_MODEL_DIR:-./models/funasr}:/app/models/funasr
+      - ./models/campplus.onnx:/app/models/campplus.onnx
+      - ./models/wakeword:/app/models/wakeword
+      - ./models/config:/app/models/config
       - ./models/voice_profiles:/app/models/voice_profiles
     environment:
       - GATEWAY_HOST=0.0.0.0

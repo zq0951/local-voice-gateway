@@ -1,0 +1,1 @@
+# 保留 config 目录结构，用于持久化 Docker/本地运行时动态配置 (runtime_config.json)

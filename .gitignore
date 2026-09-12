@@ -37,6 +37,8 @@ venv.bak/
 models/moss_tts
 models/funasr
 models/runtime_config.json
+models/config/*
+!models/config/.gitkeep
 models/*.onnx
 models/**/*.onnx
 !models/wakeword/.gitkeep

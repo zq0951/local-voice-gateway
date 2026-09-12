@@ -85,7 +85,19 @@
 
 针对 Linux / NAS / 迷你主机服务器常驻场景，项目提供了一套低延迟、声卡透传的容器化方案。
 
-### 1. 构建镜像
+### 1. 前置准备 (拉取基础模型)
+
+由于遵循开源合规性原则，模型权重不随代码打包进 Git，容器启动时将直接挂载宿主机模型。**在首次启动容器前，请务必在宿主机拉取基础模型**：
+
+```bash
+# 至少拉取 CAM++ 声纹与唤醒词模型 (约 30MB，避免宿主机因缺失文件被 Docker 误创建为空目录)
+python utils/download_models.py --campplus --wakeword
+
+# 若需在容器内进行纯本地语音识别与离线合成，请一并拉取大模型：
+# python utils/download_models.py --funasr --moss
+```
+
+### 2. 构建镜像
 
 在项目根目录下构建针对 CPU 深度优化的语音网关镜像（已预配置国内清华镜像源与 CPU 专用轻量 PyTorch）：
 
@@ -95,7 +107,7 @@ docker compose build
 # docker build -t local-voice-gateway:latest .
 ```
 
-### 2. 启动容器
+### 3. 启动容器
 
 直接在项目根目录下启动网关单容器（内置纯本地离线 ASR、声纹与 TTS 推理）：
 
@@ -105,7 +117,7 @@ docker compose up
 # docker compose up -d
 ```
 
-### 3. 容器状态检查与日志查看
+### 4. 容器状态检查与日志查看
 
 ```bash
 # 查看网关实时运行日志与声学事件流
@@ -115,16 +127,19 @@ docker compose logs -f voice-gateway
 docker compose down
 ```
 
-### 4. 容器化核心配置与声卡透传原理说明
+### 5. 容器化核心配置与持久化说明
 
+- **模型与持久化挂载 (`volumes`)**：
+  - `./models/campplus.onnx` & `./models/wakeword`：宿主机模型文件直接透传进入容器，保障混合双模（Hybrid）开箱即用；
+  - `./models/config`：挂载运行时配置目录，容器内通过 REST API 修改的触发模式与自动朗读设置在容器重启/重建后仍完整持久化；
+  - `./models/voice_profiles`：挂载用户生物声纹特征库，录入与采样数据在宿主机持久存储；
+  - 移除了旧版全目录 `- .:/app` 挂载，彻底消除宿主机工作区对 Docker 镜像构建产物的覆盖遮蔽。
 - **硬件声卡透传 (`devices: ["/dev/snd:/dev/snd"]` + `privileged: true`)**：
   使容器具备直接操作宿主机麦克风阵列与音箱声卡的物理权限，零损耗无二次重采样。
 - **共享 ALSA 声卡配置 (`/etc/asound.conf:/etc/asound.conf:ro`)**：
   自动复用宿主机校准好的录音增益与播音通道（例如 USB 麦克风音响一体机），容器内无需额外调优。
 - **网络直通模式 (`network_mode: "host"`)**：
   消除 Docker Bridge 虚拟网桥 NAT 开销与端口映射延迟，使前端 WebUI、宿主机 STT 与外部 Agent 能以毫秒级直连 `http://127.0.0.1:8765`。
-- **外部模型目录兼容**：
-  若使用了外部目录的 MOSS-TTS 软链接，`docker-compose.yml` 已通过挂载穿透物理路径，确保离线语音合成无缝加载。
 
 ---
 

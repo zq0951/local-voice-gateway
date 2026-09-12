@@ -15,10 +15,14 @@ from core.enrollment import VOICEPRINT_MANAGER
 
 logger = logging.getLogger("LocalVoiceGateway")
 
-RUNTIME_CONFIG_FILE = os.path.join(config.BASE_DIR, "models", "runtime_config.json")
+# 运行时持久化配置路径 (优先使用 models/config/ 专用目录，便于 Docker 目录级持久化挂载)
+CONFIG_DIR = os.path.join(config.BASE_DIR, "models", "config")
+RUNTIME_CONFIG_FILE = os.path.join(CONFIG_DIR, "runtime_config.json")
+LEGACY_CONFIG_FILE = os.path.join(config.BASE_DIR, "models", "runtime_config.json")
 
 def save_runtime_config():
     try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
         data = {
             "trigger_mode": config.TRIGGER_MODE,
             "auto_speak": config.AUTO_SPEAK,
@@ -30,9 +34,13 @@ def save_runtime_config():
         logger.warning(f"保存运行时配置失败: {e}")
 
 def load_runtime_config():
-    if os.path.exists(RUNTIME_CONFIG_FILE):
+    target_file = RUNTIME_CONFIG_FILE
+    if not os.path.exists(target_file) and os.path.exists(LEGACY_CONFIG_FILE):
+        target_file = LEGACY_CONFIG_FILE
+
+    if os.path.exists(target_file):
         try:
-            with open(RUNTIME_CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(target_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if "trigger_mode" in data:
                 config.TRIGGER_MODE = data["trigger_mode"]
@@ -40,7 +48,10 @@ def load_runtime_config():
                 config.AUTO_SPEAK = data["auto_speak"]
             if "wake_word_model" in data:
                 config.WAKE_WORD_MODEL = data["wake_word_model"]
-            logger.info(f"💾 已从本地存储恢复运行时配置: mode={config.TRIGGER_MODE}, auto_speak={config.AUTO_SPEAK}")
+            logger.info(f"💾 已从本地存储恢复运行时配置 ({os.path.basename(target_file)}): mode={config.TRIGGER_MODE}, auto_speak={config.AUTO_SPEAK}")
+            # 如果从旧路径读取成功，自动迁移保存至新目录
+            if target_file == LEGACY_CONFIG_FILE:
+                save_runtime_config()
         except Exception as e:
             logger.warning(f"读取运行时配置失败: {e}")
 
