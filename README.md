@@ -77,7 +77,7 @@
   start.bat
   ```
 
-网关默认监听 `http://0.0.0.0:8765`，并在控制台实时输出人声活动与事件。系统将自动根据当前操作系统（Linux ALSA vs Windows PyAudio）加载最佳声卡通道与设备防独占机制。
+网关默认监听 `http://127.0.0.1:8765`（仅本机访问；LAN/远程或 Docker 场景请设 `GATEWAY_HOST=0.0.0.0`），并在控制台实时输出人声活动与事件。系统将自动根据当前操作系统（Linux ALSA vs Windows PyAudio）加载最佳声卡通道与设备防独占机制。
 
 ---
 
@@ -125,3 +125,123 @@ docker compose down
   消除 Docker Bridge 虚拟网桥 NAT 开销与端口映射延迟，使前端 WebUI、宿主机 STT 与外部 Agent 能以毫秒级直连 `http://127.0.0.1:8765`。
 - **外部模型目录兼容**：
   若使用了外部目录的 MOSS-TTS 软链接，`docker-compose.yml` 已通过挂载穿透物理路径，确保离线语音合成无缝加载。
+
+---
+
+## 📡 对外接口契约 (API & Event Contract)
+
+Local Voice Gateway 遵循开箱即用的 REST + WebSocket 标准契约。外部 Agent、前端插件（如 DeepSeek Harness UI）或第三方系统均可基于此协议进行双向集成。
+
+### 1. 系统配置与控制 REST API
+
+| 端点 (Endpoint) | 方法 | 请求体 (Payload) | 返回示例 (Response) | 说明 |
+|---|---|---|---|---|
+| `/v1/system/status` | `GET` | 无 | `{"status":"running","trigger_mode":"hybrid","audio_duplex_mode":"half","auto_speak":true,"registered_speakers":["peter"]}` | 获取网关运行状态、模式、双工配置与已注册声纹 |
+| `/v1/system/mode` | `POST` | `{"mode": "hybrid"}` | `{"status":"ok","current_mode":"hybrid"}` | 动态切换触发模式 (`wake_word` / `voiceprint_passive` / `hybrid`) |
+| `/v1/system/autospeak` | `POST` | `{"enabled": true}` | `{"status":"ok","auto_speak":true}` | 动态切换回复自动朗读开关 (闭嘴开关联动) |
+| `/v1/system/wakeword` | `GET` | 无 | `{"current_model":"hey_jarvis","threshold":0.5,"available_models":["hey_jarvis","alexa"]}` | 查询当前唤醒词模型及可用模型列表 |
+| `/v1/system/wakeword` | `POST` | `{"model": "hey_jarvis", "threshold": 0.5}` | `{"status":"ok","current_model":"hey_jarvis"}` | 热切换唤醒词模型与置信度门限 |
+
+### 2. 物理音频播报与反馈 REST API
+
+| 端点 (Endpoint) | 方法 | 请求体 (Payload) | 返回示例 (Response) | 说明 |
+|---|---|---|---|---|
+| `/v1/audio/speak` | `POST` | `{"text": "你好，我是 Jarvis"}` | `{"status":"queued","task_id":"..."}` | 放入抢占式 TTS 合成并排队朗读，毫秒级响应不阻塞网络 |
+| `/v1/audio/stop` | `POST` | 无 | `{"status":"ok"}` | 立即中断当前正在朗读的音频并清空队列 (闭嘴) |
+| `/v1/audio/ding` | `POST` | 无 | `{"status":"ok"}` | 内存直写触发一次低延迟 `ding.pcm` 提示音 |
+
+### 3. 声纹识别与向导式录入 REST API
+
+| 端点 (Endpoint) | 方法 | 请求体 (Payload) | 返回示例 (Response) | 说明 |
+|---|---|---|---|---|
+| `/v1/voiceprint/profiles` | `GET` | 无 | `{"status":"ok","profiles":[{"name":"peter","sample_count":5}]}` | 列出声纹库中已录入的所有说话人信息 |
+| `/v1/voiceprint/{name}` | `DELETE` | 无 | `{"status":"ok","deleted":"peter"}` | 删除指定说话人并热重载声纹特征库 |
+| `/v1/voiceprint/enroll/start` | `POST` | `{"name": "peter", "steps": 5}` | `{"status":"ok","session":{"session_id":"s1","total_steps":5,...}}` | 开启多步短语引导录入会话，通知后台挂起麦克风占用 |
+| `/v1/voiceprint/enroll/record_step` | `POST` | `{"session_id": "s1"}` | `{"status":"ok","success":true,"current_step":1,...}` | 执行单步短语麦克风录制，提取特征并推进引导步骤 |
+| `/v1/voiceprint/enroll/finish` | `POST` | `{"session_id": "s1"}` | `{"status":"ok","saved_samples":5}` | 完成向导，执行离群特征剔除，持久化并热重载声纹库 |
+| `/v1/voiceprint/enroll/abort` | `POST` | `{"session_id": "s1"}` | `{"status":"ok"}` | 放弃本次录入并安全释放声卡资源 |
+
+### 4. 实时双向 WebSocket 事件流 (`/v1/events`)
+
+客户端连接 `ws://<host>:8765/v1/events` 即可实时接收网关声学事件广播（支持多客户端并发监听）：
+
+| 事件名称 (`event`) | 附带数据 (`data`) | 触发时机与业务含义 |
+|---|---|---|
+| `speech_recognized` | `{"speaker": "peter", "text": "打开客厅大灯", "emotion": "NEUTRAL"}` | 用户语音识别完成，附带说话人身份与情感标签 |
+| `wake_word_detected` | `{"model": "hey_jarvis", "score": 0.85}` | 关键词唤醒命中 |
+| `playback_started` / `tts_playing` | 无 | 本地音箱开始播放回复音频 |
+| `playback_idle` / `playback_stopped` / `tts_idle` | 无 | 本地音箱播报结束，恢复待机或聆听态 |
+| `tts_generating` | 无 | 本地 TTS 正在执行语音合成 |
+| `mode_changed` | `{"new_mode": "wake_word"}` | 网关触发模式被修改 |
+| `autospeak_changed` | `{"enabled": true}` | 自动朗读回复开关状态变更 |
+| `enroll_started` / `enroll_step_recorded` / `enroll_finished` / `enroll_aborted` | 会话详细进度数据 | 声纹录入向导各阶段状态广播 |
+
+---
+
+## 🔌 与 DeepSeek Harness (DSH) 插件对接
+
+网关与 DSH 前端插件（`packages/client/ui-voice`）之间采用纯解耦的分布式架构：
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ 🖥️ 本地语音网关 (Python Daemon, :8765)                        │
+│ 拥有声卡物理控制权: 麦克风 / 音箱 / VAD / 唤醒词 / 声纹 / STT / TTS   │
+└───────────────┬───────────────────────────────▲─────────────┘
+                │ REST API (模式切换/朗读/向导)      │ 
+                │ WebSocket /v1/events (事件广播) │ 
+                ▼                               │
+┌───────────────────────────────────────────────┴─────────────┐
+│ 🌐 DSH Web Client (浏览器运行: dsh-client-ui-voice 插件)      │
+│  - 监听 speech_recognized → 注入当前活动会话 Prompt             │
+│  - 监听 assistant/message → 调用 /v1/audio/speak 物理播报   │
+│  - 状态权威源 (SSOT): 模式与自动朗读状态始终以网关为准              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 1. 插件寻址逻辑与网络要求
+- **自动寻址**：DSH 浏览器插件默认使用当前访问地址的 `window.location.hostname + ':8765'` 连接网关（如打开 `http://127.0.0.1:3080` 时自动寻找 `http://127.0.0.1:8765`）；
+- **自定义配置覆盖**：
+  - 用户可在插件下拉菜单直接点击「修改」网关地址并保存；
+  - 也可通过浏览器控制台设置 `localStorage.setItem('dsh.voice.gateway_url', 'http://<IP>:8765')`；
+- **跨机 / 远程连接**：如果 DSH 运行在云端或远端服务器，浏览器与本地网关所在设备必须能够建立网络直连（如在同局域网内，或通过 FRP / Tailscale 等反向代理暴露网关端口，同时网关配置 `GATEWAY_HOST=0.0.0.0`）。
+
+### 2. MCP (Model Context Protocol) 扩展通道 (`mcp_server.py`)
+除 REST / WS 外，网关还内置了基于 FastMCP 的标准 stdio MCP Server，可作为 DSH 工具或独立接入 Claude Desktop、Cursor 等宿主：
+
+```bash
+# 启动 MCP Server
+python mcp_server.py
+```
+
+暴露的 5 个原生工具：
+- `speak(text)`: 排队播报文本给用户听；
+- `stop_speaking()`: 立即打断当前播报 (闭嘴)；
+- `play_ding()`: 在扬声器上播放提示音；
+- `set_mode(mode)`: 动态切换触发模式 (`wake_word` / `voiceprint_passive` / `hybrid`)；
+- `get_status()`: 获取当前网关硬件与运行状态。
+
+---
+
+## 📄 开源许可证与模型版权声明 (License & Model Disclaimer)
+
+### 1. 代码许可证 (Software License)
+本项目工程代码（包括调度逻辑、网关服务、前后端契约、工具脚本等）基于 **[MIT License](LICENSE)** 开源，与 DeepSeek Harness (DSH) 插件生态保持一致。
+
+### 2. 模型权重与二进制资产分离原则 (Model Weight Separation)
+**特别说明：模型权重 ≠ 本项目代码。**
+- 本 Git 仓库**严格遵守开源合规性原则，仅分发源代码、接口契约与下载管理脚本，不包含任何第三方预训练模型权重（`.onnx` / `.pt` / `.bin`）及二进制音频**；
+- 运行时所需的声音模型统一通过项目提供的 `utils/download_models.py` 脚本或 `install.sh` 引导程序由用户在本地按需下载；
+- 提示音 `ding.pcm` 由算法在本地按当前声卡硬件物理规格自适应合成，不作为静态二进制预先打包。
+
+### 3. 第三方模型版权归属与许可清单 (Third-Party Models)
+网关集成的各底层 AI 模型均属于其原始研发机构与作者所有。用户在下载与使用相关模型时，须严格遵守其各自的开源协议与使用规范：
+
+| 模块类别 | 模型名称 | 研发机构 / 贡献者 | 原始开源许可证 | 官方来源 / 规范 |
+|---|---|---|---|---|
+| **声纹识别** | CAM++ (ONNX) | 阿里巴巴达摩院 (Alibaba DAMO) | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | [ModelScope 官方模型库](https://modelscope.cn/models/iic/speech_campplus_sv_zh-cn_16k-common) |
+| **关键词唤醒** | OpenWakeWord Models | David Scripka | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | [openWakeWord GitHub](https://github.com/dscripka/openWakeWord) |
+| **语音识别 & VAD** | SenseVoiceSmall & FSMN-VAD | 阿里巴巴达摩院 / FunASR | [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) | [FunASR ModelScope](https://modelscope.cn/models/iic/SenseVoiceSmall) |
+| **语音合成** | MOSS-TTS-Nano | 复旦大学自然语言处理实验室 (OpenMOSS) | [MOSS-TTS 社区开源许可 / Apache 2.0](https://github.com/OpenMOSS/MOSS-TTS-Nano) | [OpenMOSS GitHub](https://github.com/OpenMOSS/MOSS-TTS-Nano) |
+
+使用者需保证遵守上述模型各自的许可限制。因超出许可范围使用或二次商用模型所产生的法律风险，由使用者自行承担。
+

@@ -45,6 +45,23 @@ if ! command -v arecord &>/dev/null || ! command -v aplay &>/dev/null; then
     echo "ℹ️ 提示: 未检测到 ALSA 工具 (arecord/aplay)，网关将自动启用跨平台 PyAudio 模式托管声卡"
 fi
 
+# 检查并自动补齐轻量核心模型 (CAM++ 声纹与 OpenWakeWord 唤醒词)
+mkdir -p "$DIR/models/voice_profiles" "$DIR/models/wakeword"
+
+if [ ! -f "$DIR/models/campplus.onnx" ]; then
+    echo "📦 检测到缺失 CAM++ 声纹模型，正在自动拉取 (约 26MB)..."
+    "$PYTHON_EXEC" "$DIR/utils/download_models.py" --campplus || echo "⚠️ CAM++ 下载未完成，后续可执行: $PYTHON_EXEC utils/download_models.py --campplus"
+else
+    echo "✅ CAM++ 声纹识别模型已就绪"
+fi
+
+if [ ! -f "$DIR/models/wakeword/hey_jarvis_v0.1.onnx" ] || [ ! -f "$DIR/models/wakeword/melspectrogram.onnx" ]; then
+    echo "📦 检测到缺失 OpenWakeWord 唤醒词模型，正在自动拉取..."
+    "$PYTHON_EXEC" "$DIR/utils/download_models.py" --wakeword || echo "⚠️ 唤醒词模型下载未完成，后续可执行: $PYTHON_EXEC utils/download_models.py --wakeword"
+else
+    echo "✅ OpenWakeWord 唤醒词核心模型已就绪"
+fi
+
 # 检查本地 FunASR 纯离线识别模型与库
 if [ -d "$DIR/models/funasr/SenseVoiceSmall" ] && "$PYTHON_EXEC" -c "import funasr" &>/dev/null; then
     echo "✅ FunASR STT 语音识别: 本地原生引擎已就绪 (纯本地私有/免 Docker)"

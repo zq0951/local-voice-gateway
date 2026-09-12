@@ -1,0 +1,1 @@
+# 保留 wakeword 目录结构，唤醒词 ONNX 模型由 utils/download_models.py 动态拉取并由 .gitignore 忽略

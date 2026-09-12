@@ -13,7 +13,7 @@ services:
     devices:
       - "/dev/snd:/dev/snd"
     volumes:
-      - .:/app
+      # 仅挂载硬件声卡配置、模型权重与用户声纹持久化目录，避免宿主机工作区直接遮蔽镜像内部环境
       - /etc/asound.conf:/etc/asound.conf:ro
       - ${MOSS_MODEL_DIR:-./models/moss_tts}:/app/models/moss_tts
       - ${FUNASR_MODEL_DIR:-./models/funasr}:/app/models/funasr

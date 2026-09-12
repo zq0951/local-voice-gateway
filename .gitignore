@@ -33,10 +33,13 @@ ENV/
 env.bak/
 venv.bak/
 
-# Models & Symlinks (大模型权重与宿主软链接)
+# Models & Symlinks (大模型权重与宿主软链接，一律通过 utils/download_models.py 动态拉取)
 models/moss_tts
 models/funasr
 models/runtime_config.json
+models/*.onnx
+models/**/*.onnx
+!models/wakeword/.gitkeep
 
 # User Voice Profiles (保护用户个人生物声纹隐私，仅保留空目录)
 models/voice_profiles/*
@@ -55,6 +58,8 @@ temp_*.pcm
 *~
 
 # Generated assets and test cache
+assets/*.pcm
 assets/ding.pcm
+!assets/.gitkeep
 .pytest_cache/
 

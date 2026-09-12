@@ -1,0 +1,1 @@
+# 保留 assets 目录结构，运行时自动合成 ding.pcm 并由 .gitignore 忽略二进制

@@ -91,6 +91,18 @@ echo "📦 独立安装 openwakeword (使用 --no-deps 纯 ONNX 推理模式)...
 # 检查并配置模型目录
 echo "🔗 检查本地模型路径..."
 mkdir -p "$DIR/models/voice_profiles"
+mkdir -p "$DIR/models/wakeword"
+
+# 0. 检查 CAM++ 声纹与 OpenWakeWord 基础轻量模型 (约 30MB)
+if [ ! -f "$DIR/models/campplus.onnx" ]; then
+    echo "📦 自动拉取 CAM++ 声纹识别 ONNX 模型..."
+    "$PYTHON_EXEC" "$DIR/utils/download_models.py" --campplus || true
+fi
+
+if [ ! -f "$DIR/models/wakeword/hey_jarvis_v0.1.onnx" ] || [ ! -f "$DIR/models/wakeword/melspectrogram.onnx" ]; then
+    echo "📦 自动拉取 OpenWakeWord 唤醒词核心模型..."
+    "$PYTHON_EXEC" "$DIR/utils/download_models.py" --wakeword || true
+fi
 
 # 1. 检查 FunASR 语音识别模型
 if [ ! -e "$DIR/models/funasr" ]; then
