@@ -21,6 +21,7 @@ services:
       - ./models/wakeword:/app/models/wakeword
       - ./models/config:/app/models/config
       - ./models/voice_profiles:/app/models/voice_profiles
+      - ./assets:/app/assets
     environment:
       - GATEWAY_HOST=0.0.0.0
       - GATEWAY_PORT=${GATEWAY_PORT:-8765}

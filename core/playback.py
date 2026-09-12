@@ -328,6 +328,7 @@ def playback_worker(audio_queue: queue.Queue):
         set_is_playing(True)
         logger.info(f"🔊 [扬声器开始发声]: 时长 {total_audio_sec:.1f}s, 写入播放通道...")
 
+        just_created = False
         if player_proc is None or (hasattr(player_proc, "poll") and player_proc.poll() is not None):
             player_proc = create_audio_player()
             with _player_proc_lock:
@@ -344,6 +345,7 @@ def playback_worker(audio_queue: queue.Queue):
             try:
                 player_proc.stdin.write(silence_padding)
                 player_proc.stdin.flush()
+                just_created = True
             except Exception as e:
                 logger.debug(f"写入初始静音缓冲: {e}")
 
@@ -377,17 +379,19 @@ def playback_worker(audio_queue: queue.Queue):
 
             # 数据全部注入管道后，等待硬件自然播放完毕剩余缓冲
             if not interrupted:
-                written_sec = chunk_len / bytes_per_sec
+                # 总播放等待时长需计入: 音频本身时长 + 首次打开设备的前置静音补偿(100ms) + 声卡硬件缓冲区排空余量(80ms)
+                hardware_drain_margin = 0.08 + (0.10 if just_created else 0.0)
+                total_wait_sec = (chunk_len / bytes_per_sec) + hardware_drain_margin
                 while True:
                     with _player_proc_lock:
                         if _current_player_proc is not player_proc or player_proc is None:
                             interrupted = True
                             break
                     elapsed_sec = time.monotonic() - t_start
-                    if elapsed_sec >= written_sec:
+                    if elapsed_sec >= total_wait_sec:
                         logger.info("✅ [扬声器播放完毕]: 音频已完整播放")
                         break
-                    time.sleep(min(0.05, max(0.01, written_sec - elapsed_sec)))
+                    time.sleep(min(0.05, max(0.01, total_wait_sec - elapsed_sec)))
 
         except (BrokenPipeError, OSError) as e:
             err_details = ""
