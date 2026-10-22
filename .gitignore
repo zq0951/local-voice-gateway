@@ -60,8 +60,6 @@ temp_*.pcm
 *~
 
 # Generated assets and test cache
-assets/*.pcm
-assets/ding.pcm
 !assets/.gitkeep
 .pytest_cache/
 
