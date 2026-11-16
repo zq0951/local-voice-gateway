@@ -1,14 +1,17 @@
 import os
+import re
 import json
 import asyncio
 import logging
+import tempfile
 from typing import List, Set, Optional
-from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Body, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import config
 from core.playback import play_ding, stop_playback, set_playback_callback
 from core.tts import synthesize_and_enqueue, enqueue_tts, stop_tts, set_tts_event_broadcaster
+from core.stt import LOCAL_STT_ENGINE, init_stt_engine, transcribe_audio
 from core.speaker_verifier import SPEAKER_VERIFIER
 from core.wakeword import WAKEWORD_DETECTOR
 from core.enrollment import VOICEPRINT_MANAGER
@@ -123,6 +126,8 @@ async def get_status():
         "auto_speak": config.AUTO_SPEAK,
         "wake_word_model": config.WAKE_WORD_MODEL,
         "voiceprint_threshold": config.VOICEPRINT_THRESHOLD,
+        "stt_ready": bool(LOCAL_STT_ENGINE.is_initialized),
+        "stt_device": LOCAL_STT_ENGINE.device,
         "registered_speakers": list(SPEAKER_VERIFIER.centroids.keys())
     }
 
@@ -196,6 +201,121 @@ async def stop_audio():
     """立即打断当前合成与播报并清空任务队列 (闭嘴开关)"""
     stop_tts()
     return {"status": "ok"}
+
+
+_MIME_EXT_MAP = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+    "audio/webm": ".webm",
+    "audio/flac": ".flac",
+}
+
+
+def _resolve_audio_suffix(filename: Optional[str], content_type: Optional[str]) -> str:
+    raw_ext = os.path.splitext(filename or "")[1].lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,8}", raw_ext):
+        return raw_ext
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    return _MIME_EXT_MAP.get(ctype, ".wav")
+
+
+async def _handle_stt_upload(
+    upload: Optional[UploadFile],
+    language: Optional[str],
+    use_itn: bool,
+    response_format: Optional[str],
+):
+    if upload is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "请通过 multipart 表单字段 'file' 或 'audio' 上传音频文件"},
+        )
+
+    max_bytes = max(1, int(getattr(config, "STT_MAX_AUDIO_MB", 25))) * 1024 * 1024
+    suffix = _resolve_audio_suffix(upload.filename, upload.content_type)
+    tmp_path = None
+    total_read = 0
+
+    try:
+        with tempfile.NamedTemporaryFile(prefix="lvg_stt_", suffix=suffix, delete=False) as tf:
+            tmp_path = tf.name
+            while True:
+                chunk = await upload.read(65536)
+                if not chunk:
+                    break
+                total_read += len(chunk)
+                if total_read > max_bytes:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"error": f"音频文件超过上限 ({max_bytes // (1024 * 1024)} MB)"},
+                    )
+                tf.write(chunk)
+
+        if total_read == 0:
+            return JSONResponse(status_code=400, content={"error": "上传的音频文件为空"})
+
+        if not LOCAL_STT_ENGINE.is_initialized:
+            await asyncio.to_thread(init_stt_engine)
+        if not LOCAL_STT_ENGINE.is_initialized:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "STT 引擎未就绪，请检查 SenseVoiceSmall 模型目录与 funasr 依赖"},
+            )
+
+        lang_opt = (language or "auto").strip() or "auto"
+        res = await transcribe_audio(tmp_path, language=lang_opt, use_itn=use_itn)
+        text = res.get("text", "")
+
+        fmt = (response_format or "json").strip().lower()
+        if fmt == "text":
+            return PlainTextResponse(text)
+        return {
+            "text": text,
+            "language": res.get("lang"),
+            "emotion": res.get("emotion"),
+            "event": res.get("event"),
+            "is_speech": bool(res.get("is_speech", False)),
+        }
+    finally:
+        try:
+            await upload.close()
+        except Exception:
+            pass
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+@app.post("/v1/audio/transcriptions")
+@app.post("/v1/audio/stt")
+@app.post("/v1/audio/transcribe")
+async def transcribe_audio_endpoint(
+    file: Optional[UploadFile] = File(None),
+    audio: Optional[UploadFile] = File(None),
+    language: Optional[str] = Form(None),
+    use_itn: bool = Form(True),
+    response_format: Optional[str] = Form("json"),
+    model: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
+):
+    """
+    本地离线 STT 语音转文字接口 (FunASR SenseVoiceSmall):
+    - 兼容 OpenAI `/v1/audio/transcriptions` (表单字段 `file`)
+    - 兼容网关风格 `/v1/audio/stt` 与 `/v1/audio/transcribe` (支持字段 `file` 或 `audio`)
+    """
+    del model, prompt
+    upload = file if file is not None else audio
+    return await _handle_stt_upload(upload, language, use_itn, response_format)
 
 # ==============================================================================
 # 👤 声纹识别与多步引导录入 API (B1, B2, B3, B4)

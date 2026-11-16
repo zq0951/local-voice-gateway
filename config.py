@@ -82,6 +82,10 @@ CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
 # 本地 FunASR / SenseVoice 离线模型路径 (纯本地进程内推理，零网络开销与端口占用)
 FUNASR_MODEL_DIR = os.getenv("FUNASR_MODEL_DIR", os.path.join(BASE_DIR, "models/funasr"))
+# STT 设备选择: "auto" (显存充裕时用 CUDA，否则自动回落 CPU)、"cpu"、"cuda:0"
+STT_DEVICE = os.getenv("STT_DEVICE", "auto")
+# HTTP STT 接口单次上传音频大小上限 (MB)
+STT_MAX_AUDIO_MB = int(os.getenv("STT_MAX_AUDIO_MB", "25"))
 
 # 后端 Agent 接口 (留空或设为 "echo" 时，网关进入纯本地回环复述模式，零配置开箱即测)
 AGENT_API_URL = os.getenv("AGENT_API_URL", "echo")
