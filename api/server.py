@@ -6,10 +6,12 @@ import logging
 import tempfile
 from typing import List, Set, Optional
 from fastapi import FastAPI, Body, File, Form, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, PlainTextResponse
+import asyncio
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import config
 from core.playback import play_ding, stop_playback, set_playback_callback
+import core.tts as tts_core
 from core.tts import synthesize_and_enqueue, enqueue_tts, stop_tts, set_tts_event_broadcaster
 from core.stt import LOCAL_STT_ENGINE, init_stt_engine, transcribe_audio
 from core.speaker_verifier import SPEAKER_VERIFIER
@@ -126,6 +128,7 @@ async def get_status():
         "auto_speak": config.AUTO_SPEAK,
         "wake_word_model": config.WAKE_WORD_MODEL,
         "voiceprint_threshold": config.VOICEPRINT_THRESHOLD,
+        "tts_ready": bool(tts_core.MOSS_SERVICE is not None),
         "stt_ready": bool(LOCAL_STT_ENGINE.is_initialized),
         "stt_device": LOCAL_STT_ENGINE.device,
         "registered_speakers": list(SPEAKER_VERIFIER.centroids.keys())
@@ -201,6 +204,62 @@ async def stop_audio():
     """立即打断当前合成与播报并清空任务队列 (闭嘴开关)"""
     stop_tts()
     return {"status": "ok"}
+
+
+MAX_SPEECH_TEXT_CHARS = 1200
+
+
+async def _synthesize_speech_response(payload: dict):
+    """整段单次合成并返回 WAV 音频字节，不做分句切分。"""
+    if not isinstance(payload, dict):
+        return JSONResponse(status_code=400, content={"error": "请求体必须为 JSON 对象"})
+
+    raw_text = payload.get("input")
+    if raw_text is None or (isinstance(raw_text, str) and not raw_text.strip()):
+        raw_text = payload.get("text")
+    clean_text = str(raw_text or "").strip()
+    if not clean_text:
+        return JSONResponse(status_code=400, content={"error": "input/text 不能为空"})
+    if len(clean_text) > MAX_SPEECH_TEXT_CHARS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"文本长度超过 {MAX_SPEECH_TEXT_CHARS} 字符上限"},
+        )
+
+    raw_voice = payload.get("voice")
+    clean_voice = str(raw_voice).strip() if isinstance(raw_voice, str) and raw_voice.strip() else None
+
+    if tts_core.MOSS_SERVICE is None:
+        try:
+            await asyncio.to_thread(tts_core.init_tts_engine)
+        except Exception:
+            pass
+    if tts_core.MOSS_SERVICE is None:
+        return JSONResponse(status_code=503, content={"error": "TTS 引擎不可用或尚未就绪"})
+
+    try:
+        wav_bytes = await asyncio.to_thread(tts_core.synthesize_to_wav_bytes, clean_text, clean_voice)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=503, content={"error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"TTS 合成失败: {exc}"})
+
+    if not wav_bytes or len(wav_bytes) < 44:
+        return JSONResponse(status_code=500, content={"error": "TTS 合成失败或输出无效空音频"})
+
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(payload: dict = Body(default={})):
+    """OpenAI 兼容 HTTP TTS 接口：单次整段合成并返回 audio/wav 音频流。"""
+    return await _synthesize_speech_response(payload)
+
+
+@app.post("/v1/audio/tts")
+async def audio_tts(payload: dict = Body(default={})):
+    """HTTP TTS 接口别名：单次整段合成并返回 audio/wav 音频流。"""
+    return await _synthesize_speech_response(payload)
 
 
 _MIME_EXT_MAP = {

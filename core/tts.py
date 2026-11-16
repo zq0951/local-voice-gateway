@@ -1,6 +1,8 @@
+import io
 import os
 import sys
 import time
+import wave
 import queue
 import threading
 import logging
@@ -32,6 +34,7 @@ torchaudio.load = _patched_torchaudio_load
 torchaudio.save = _patched_torchaudio_save
 
 MOSS_SERVICE = None
+_tts_infer_lock = threading.Lock()
 
 def apply_offline_patches(moss_path, hf_cache_path):
     """为 CPU 离线环境注入精准补丁，确保 MOSS-TTS 无网无显卡完美运行"""
@@ -295,89 +298,92 @@ def init_tts_engine():
         logger.error(f"初始化 MOSS TTS 失败: {e}")
     return MOSS_SERVICE
 
-def synthesize_and_enqueue(text: str, check_task_valid=None):
-    """整段自然合成语音并将生成的双声道 PCM 推入播放队列 (保证全局语气语调连贯一致)"""
-    clean_text = filter_symbols(text)
-    if not clean_text:
-        return False
-
-    logger.info(f"🔊 [TTS 请求]: {clean_text} (共 {len(clean_text)} 字)")
-
+def _synthesize_pcm_bytes(
+    clean_text: str,
+    voice: str = None,
+    target_sample_rate: int = None,
+    target_channels: int = None,
+    check_task_valid=None,
+):
+    """
+    整段一致合成共享核心：返回 (pcm_int16_bytes, sample_rate, channels, duration_s)，失败返回 None。
+    不做按句拆分，确保整段回复音色与语调连贯统一。
+    """
     if MOSS_SERVICE is None:
         init_tts_engine()
 
     if not MOSS_SERVICE:
-        logger.warning(f"TTS 服务未就绪，模拟播报: {clean_text}")
-        return False
+        logger.warning(f"TTS 服务未就绪，跳过合成: {clean_text}")
+        return None
 
     if check_task_valid and not check_task_valid():
         logger.info("🚫 [TTS 取消]: 任务开始前已被抢占打断")
-        return False
+        return None
 
     start_time = time.monotonic()
     try:
         if len(clean_text) > 20:
-            logger.info(f"⏳ [MOSS-TTS 推理中]: 正在为 {len(clean_text)} 字长文本生成高保真语音 (CPU 推理约需 5~10 秒，请稍候)...")
-        # 黄金推理组合：
-        # 1. voice_clone_max_text_tokens=75：遵循 MOSS-TTS-Nano 最佳声学窗口自然分句，杜绝超长单句导致模型发散死循环
-        # 2. tts_max_batch_size=1：强制逐句独立串行生成，彻底消灭 left-pad padding（padding 长度为 0），杜绝数值溢出
-        # 3. attn_implementation='eager'：在 CPU 上使用经典高精度矩阵乘法，杜绝 SDPA 产生的 NaN
-        result = MOSS_SERVICE.synthesize(
-            text=clean_text,
-            voice_clone_max_text_tokens=75,
-            tts_max_batch_size=1,
-            max_new_frames=200,
-            attn_implementation="eager"
-        )
-        
+            logger.info(f"⏳ [MOSS-TTS 推理中]: 正在为 {len(clean_text)} 字文本整段合成高保真语音...")
+        synth_kwargs = {
+            "text": clean_text,
+            "voice_clone_max_text_tokens": 75,
+            "tts_max_batch_size": 1,
+            "max_new_frames": 200,
+            "attn_implementation": "eager",
+        }
+        if voice and str(voice).strip():
+            synth_kwargs["voice"] = str(voice).strip()
+
+        with _tts_infer_lock:
+            result = MOSS_SERVICE.synthesize(**synth_kwargs)
+
         if check_task_valid and not check_task_valid():
-            logger.info("🚫 [TTS 取消]: 合成完成但在推入播放前任务已被打断，丢弃生成的音频帧")
-            return False
+            logger.info("🚫 [TTS 取消]: 合成完成但在输出前任务已被打断，丢弃音频帧")
+            return None
 
         waveform = result["waveform"]
-        sr = result["sample_rate"]
+        sr = int(result["sample_rate"])
         cost_s = time.monotonic() - start_time
 
-        # 杜绝任何 NaN/Inf 导致静音：若波形异常自动清除非法数值点
         if torch.isnan(waveform).any() or torch.isinf(waveform).any():
             logger.warning("⚠️ 检测到波形包含非数值(NaN/Inf)，执行平滑修复并清除非数值点")
             waveform = torch.nan_to_num(waveform, nan=0.0, posinf=0.8, neginf=-0.8)
 
-        if sr != HW_SAMPLE_RATE:
-            waveform = torchaudio.functional.resample(waveform, sr, HW_SAMPLE_RATE)
+        out_sr = target_sample_rate if (target_sample_rate and target_sample_rate > 0) else sr
+        if sr != out_sr:
+            waveform = torchaudio.functional.resample(waveform, sr, out_sr)
 
-        # 1. 异常长度截断保护 (放宽安全裕量，防止长篇笑话或正常慢速朗读被误截断)
         max_allowed_seconds = max(len(clean_text) * 0.60 + 6.0, 20.0)
-        max_allowed_frames = int(max_allowed_seconds * HW_SAMPLE_RATE)
+        max_allowed_frames = int(max_allowed_seconds * out_sr)
         if waveform.shape[-1] > max_allowed_frames:
-            logger.warning(f"⚠️ 音频时长超过安全阈值 ({waveform.shape[-1]/HW_SAMPLE_RATE:.1f}s > {max_allowed_seconds:.1f}s)，执行尾部保护截断")
+            logger.warning(f"⚠️ 音频时长超过安全阈值 ({waveform.shape[-1]/out_sr:.1f}s > {max_allowed_seconds:.1f}s)，执行尾部保护截断")
             waveform = waveform[..., :max_allowed_frames]
 
-        # 2. 尾部绝对静音修剪 (保留 0.25s 自然空间余音，避免尾字掐头)
-        if waveform.dim() > 1:
-            mono = waveform.mean(dim=0)
-        else:
-            mono = waveform
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+
+        mono = waveform.mean(dim=0)
         non_silent = torch.nonzero(mono.abs() > 0.002)
         if non_silent.numel() > 0:
             last_idx = non_silent[-1].item()
-            end_idx = min(last_idx + int(HW_SAMPLE_RATE * 0.25), waveform.shape[-1])
+            end_idx = min(last_idx + int(out_sr * 0.25), waveform.shape[-1])
             waveform = waveform[..., :end_idx]
 
-        # 3. 声道适配与 PCM 转换
-        if waveform.shape[0] == 1 and PLAYBACK_CHANNELS == 2:
+        out_ch = target_channels if (target_channels and target_channels > 0) else waveform.shape[0]
+        if waveform.shape[0] == 1 and out_ch == 2:
             waveform = waveform.repeat(2, 1)
+        elif waveform.shape[0] > 1 and out_ch == 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
 
         max_amplitude = float(waveform.abs().max().item())
         mean_amplitude = float(waveform.abs().mean().item())
-        audio_len_s = waveform.shape[-1] / HW_SAMPLE_RATE
-        logger.info(f"📊 [TTS 音频质检]: 时长={audio_len_s:.1f}s, 最大幅值={max_amplitude:.4f}, 平均幅值={mean_amplitude:.4f}")
+        audio_len_s = waveform.shape[-1] / out_sr
+        logger.info(f"📊 [TTS 音频质检]: 时长={audio_len_s:.1f}s, sr={out_sr}, ch={waveform.shape[0]}, 最大幅值={max_amplitude:.4f}, 平均幅值={mean_amplitude:.4f}")
         if max_amplitude < 0.001:
             logger.error("❌ [TTS 音频质检失败]: 模型生成的波形全为静音(幅值接近0)，请检查模型输入！")
 
         pcm_data = (torch.clamp(waveform, -1.0, 1.0) * 32767).to(torch.int16).cpu().numpy().T.tobytes()
 
-        # 4. 及时清理临时音频文件
         audio_path = result.get("audio_path")
         if audio_path and os.path.exists(audio_path):
             try:
@@ -385,16 +391,60 @@ def synthesize_and_enqueue(text: str, check_task_valid=None):
             except Exception:
                 pass
 
-        if check_task_valid and not check_task_valid():
-            return False
-
-        logger.info(f"✅ [TTS 合成完成]: 音频 {audio_len_s:.1f}s, 推理耗时 {cost_s:.2f}s, 准备发声")
-
-        GLOBAL_AUDIO_QUEUE.put(pcm_data)
-        return True
+        logger.info(f"✅ [TTS 合成完成]: 音频 {audio_len_s:.1f}s, 推理耗时 {cost_s:.2f}s")
+        return pcm_data, out_sr, int(waveform.shape[0]), audio_len_s
     except Exception as e:
         logger.error(f"TTS 合成出错: {e}")
+        return None
+
+
+def synthesize_and_enqueue(text: str, check_task_valid=None):
+    """整段自然合成语音并将生成的双声道 PCM 推入播放队列 (保证全局语气语调连贯一致)"""
+    clean_text = filter_symbols(text)
+    if not clean_text:
         return False
+
+    logger.info(f"🔊 [TTS 请求]: {clean_text} (共 {len(clean_text)} 字)")
+    synth = _synthesize_pcm_bytes(
+        clean_text,
+        target_sample_rate=HW_SAMPLE_RATE,
+        target_channels=PLAYBACK_CHANNELS,
+        check_task_valid=check_task_valid,
+    )
+    if not synth:
+        return False
+
+    pcm_data, _, _, _ = synth
+    if check_task_valid and not check_task_valid():
+        return False
+    GLOBAL_AUDIO_QUEUE.put(pcm_data)
+    return True
+
+
+def synthesize_to_wav_bytes(text: str, voice: str = None) -> bytes:
+    """整段合成并返回标准单声道 16-bit WAV 字节流（供手机/远程客户端播放，不分句以保音色一致）"""
+    clean_text = filter_symbols(text)
+    if not clean_text:
+        return b""
+
+    logger.info(f"🌐 [HTTP TTS 请求]: {clean_text} (共 {len(clean_text)} 字, voice={voice or 'default'})")
+    synth = _synthesize_pcm_bytes(
+        clean_text,
+        voice=voice,
+        target_sample_rate=None,
+        target_channels=1,
+    )
+    if not synth:
+        return b""
+
+    pcm_data, sr, ch, _ = synth
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(ch)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(pcm_data)
+    return buf.getvalue()
 
 # ==============================================================================
 # 🎯 异步非阻塞 TTS 调度器 (防止多请求打死 CPU/网络，毫秒级响应，支持即时打断)

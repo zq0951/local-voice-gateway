@@ -234,6 +234,90 @@ class TestVoiceprintEnrollment(unittest.TestCase):
         self.assertTrue(result.get("already_completed"))
 
 
+import core.tts as core_tts
+import torch
+import wave
+
+
+class TestGatewayTts(unittest.TestCase):
+    """测试 HTTP 整段单次 TTS 接口与 WAV 编码"""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_speech_endpoint_single_pass_wav(self):
+        multi_sentence = "第一句话，检查一下网关连接。第二句话，音色必须保持一致！第三句话 Hello."
+        fake_wave = torch.tensor([[0.1, -0.2, 0.3, -0.15] * 100], dtype=torch.float32)
+        fake_service = MagicMock()
+        fake_service.synthesize.return_value = {
+            "sample_rate": 24000,
+            "waveform": fake_wave,
+            "audio_path": "",
+        }
+
+        with patch.object(core_tts, "MOSS_SERVICE", fake_service):
+            resp = self.client.post("/v1/audio/speech", json={"input": multi_sentence})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["content-type"].startswith("audio/wav"))
+        self.assertTrue(resp.content.startswith(b"RIFF"))
+
+        with wave.open(io.BytesIO(resp.content), "rb") as wf:
+            self.assertEqual(wf.getnchannels(), 1)
+            self.assertEqual(wf.getsampwidth(), 2)
+            self.assertEqual(wf.getframerate(), 24000)
+            self.assertEqual(wf.getnframes(), 400)
+
+        # 关键约束：整段文本必须一次送入 synthesize，不能分句多次调用
+        fake_service.synthesize.assert_called_once()
+        called_kwargs = fake_service.synthesize.call_args.kwargs
+        called_args = fake_service.synthesize.call_args.args
+        passed_text = called_kwargs.get("text") if "text" in called_kwargs else called_args[0]
+        self.assertEqual(passed_text, core_tts.filter_symbols(multi_sentence))
+
+    def test_tts_alias_and_voice_forwarding(self):
+        fake_wave = torch.tensor([0.05, -0.05] * 50, dtype=torch.float32)
+        fake_service = MagicMock()
+        fake_service.synthesize.return_value = {
+            "sample_rate": 24000,
+            "waveform": fake_wave,
+        }
+
+        with patch.object(core_tts, "MOSS_SERVICE", fake_service):
+            resp = self.client.post("/v1/audio/tts", json={"text": "测试别名与音色透传", "voice": "female_soft"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.content.startswith(b"RIFF"))
+        fake_service.synthesize.assert_called_once()
+        kwargs = fake_service.synthesize.call_args.kwargs
+        self.assertEqual(kwargs.get("voice"), "female_soft")
+
+    def test_speech_validation_unavailable_and_error(self):
+        with patch.object(core_tts, "MOSS_SERVICE", MagicMock()):
+            empty_resp = self.client.post("/v1/audio/speech", json={"input": "   "})
+            self.assertEqual(empty_resp.status_code, 400)
+
+            long_resp = self.client.post("/v1/audio/speech", json={"text": "字" * 1201})
+            self.assertEqual(long_resp.status_code, 400)
+
+        with patch.object(core_tts, "MOSS_SERVICE", None), \
+             patch.object(core_tts, "init_tts_engine", return_value=None):
+            unavail_resp = self.client.post("/v1/audio/speech", json={"input": "你好"})
+            self.assertEqual(unavail_resp.status_code, 503)
+
+        bad_service = MagicMock()
+        bad_service.synthesize.side_effect = RuntimeError("mock infer boom")
+        with patch.object(core_tts, "MOSS_SERVICE", bad_service):
+            err_resp = self.client.post("/v1/audio/speech", json={"input": "你好"})
+            self.assertEqual(err_resp.status_code, 500)
+
+    def test_status_reports_tts_ready(self):
+        with patch.object(core_tts, "MOSS_SERVICE", MagicMock()):
+            resp = self.client.get("/v1/system/status")
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.json().get("tts_ready"))
+
+
 class TestSyncBroadcast(unittest.TestCase):
     """测试同步广播跨线程安全性"""
 

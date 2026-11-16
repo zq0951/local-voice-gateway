@@ -165,6 +165,7 @@ Local Voice Gateway 遵循开箱即用的 REST + WebSocket 标准契约。外部
 | `/v1/audio/stop` | `POST` | 无 | `{"status":"ok"}` | 立即中断当前正在朗读的音频并清空队列 (闭嘴) |
 | `/v1/audio/ding` | `POST` | 无 | `{"status":"ok"}` | 内存直写触发一次低延迟 `ding.pcm` 提示音 |
 | `/v1/audio/transcriptions` / `/v1/audio/stt` | `POST` (`multipart/form-data`) | `file` 或 `audio` 音频文件（可选 `language`, `use_itn`, `response_format`） | `{"text":"你好","language":"zh","emotion":"NEUTRAL","event":"Speech","is_speech":true}` | 离线 SenseVoice STT 转写（兼容 OpenAI `/v1/audio/transcriptions` 与 `audio` 字段） |
+| `/v1/audio/speech` / `/v1/audio/tts` | `POST` (`application/json`) | `{"input": "整段待合成文本", "voice": "可选音色"}`（兼容 `text` 字段） | `audio/wav` 二进制音频流 | 离线 MOSS-TTS-Nano 整段单次合成接口（不分句切分，返回标准 16-bit PCM WAV） |
 
 ### 3. 声纹识别与向导式录入 REST API
 
